@@ -1,14 +1,7 @@
 import { SonosError } from "./soap.ts";
 
-// Newer firmware (S2) also offers the Sonos Control API on a local
-// WebSocket: wss://<ip>:1443/websocket/api. Messages are JSON arrays
-// [header, body]. The namespaces and commands match the cloud Control API
-// (https://docs.sonos.com/docs/control): groups:1, playback:1,
-// playbackMetadata:1, groupVolume:1, playerVolume:1, favorites:1,
-// playlists:1, audioClip:1.
-//
-// The API key is the public key that the Sonos app and Home Assistant
-// (sonos-websocket) send. The speaker uses a self-signed certificate.
+// Local copy of the cloud Control API (https://docs.sonos.com/docs/control), S2 firmware only.
+// The speaker only checks that the key header exists. Its certificate comes from a private Sonos CA.
 const API_KEY = "123e4567-e89b-12d3-a456-426655440000";
 const PROTOCOL = "v1.api.smartspeaker.audio";
 const WS_PORT = 1443;
@@ -29,7 +22,6 @@ export class SonosWebSocket {
   private nextId = 1;
   private pending = new Map<string, { resolve: (m: WsMessage) => void; reject: (e: Error) => void }>();
   private listeners: ((m: WsMessage) => void)[] = [];
-  /** Learned from the header of the first message. */
   private household: string | undefined;
 
   private constructor(private socket: WebSocket) {
@@ -61,7 +53,6 @@ export class SonosWebSocket {
     });
   }
 
-  /** Sends one command. Resolves with the response or rejects with the error code. */
   request(header: WsHeader, body: Record<string, unknown> = {}): Promise<WsMessage> {
     const cmdId = String(this.nextId++);
     return new Promise((resolve, reject) => {
@@ -83,17 +74,13 @@ export class SonosWebSocket {
     });
   }
 
-  /**
-   * Household commands need the householdId. The speaker returns it in the
-   * header of every response, also of error responses.
-   */
+  // Every response header carries the householdId, error responses too.
   async householdId(): Promise<string> {
     if (!this.household) await this.request({ namespace: "groups:1", command: "getGroups" }).catch(() => {});
     if (!this.household) throw new SonosError("Speaker did not return a householdId");
     return this.household;
   }
 
-  /** Receives events from `subscribe` commands. */
   onEvent(listener: (m: WsMessage) => void) {
     this.listeners.push(listener);
   }
@@ -121,7 +108,6 @@ export class SonosWebSocket {
   }
 }
 
-/** Opens a connection, sends one command, and closes the connection. */
 export async function wsRequest(ip: string, header: WsHeader, body: Record<string, unknown> = {}): Promise<WsMessage> {
   const ws = await SonosWebSocket.connect(ip);
   try {

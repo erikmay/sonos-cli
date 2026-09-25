@@ -8,7 +8,7 @@ export interface Member {
   uuid: string;
   name: string;
   ip: string;
-  /** Hidden members: bridges, subwoofers, home theater satellites, right side of stereo pairs. */
+  /** Bridges, subwoofers, satellites, right side of stereo pairs. */
   invisible: boolean;
 }
 
@@ -27,7 +27,6 @@ const SSDP_ADDRESS = "239.255.255.250";
 const SSDP_PORT = 1900;
 const SEARCH_TARGET = "urn:schemas-upnp-org:device:ZonePlayer:1";
 
-/** Finds speakers with an SSDP M-SEARCH multicast. Returns their IP addresses. */
 export async function ssdpDiscover(timeoutMs = 1500): Promise<string[]> {
   const message =
     "M-SEARCH * HTTP/1.1\r\n" +
@@ -43,7 +42,7 @@ export async function ssdpDiscover(timeoutMs = 1500): Promise<string[]> {
       },
     },
   });
-  // UDP can drop packets, so send the search more than once.
+  // UDP drops packets.
   for (let i = 0; i < 3; i++) {
     socket.send(message, SSDP_PORT, SSDP_ADDRESS);
     await Bun.sleep(100);
@@ -53,10 +52,7 @@ export async function ssdpDiscover(timeoutMs = 1500): Promise<string[]> {
   return [...found];
 }
 
-/**
- * Fallback when multicast does not work (VPN, some Wi-Fi setups):
- * probe port 1400 on every address of the local /24 networks.
- */
+// For networks without multicast (VPN, some Wi-Fi setups).
 export async function scanNetwork(timeoutMs = 700): Promise<string[]> {
   const prefixes = new Set<string>();
   for (const addresses of Object.values(networkInterfaces())) {
@@ -80,11 +76,11 @@ export async function scanNetwork(timeoutMs = 700): Promise<string[]> {
   return results.filter((ip): ip is string => ip !== null);
 }
 
-/** Reads the zone group topology from one speaker. Every speaker knows the full household. */
+// Any speaker returns the topology of the whole household.
 export async function getTopology(ip: string, timeoutMs?: number): Promise<Topology> {
   const { ZoneGroupState } = await soap(ip, "ZoneGroupTopology", "GetZoneGroupState", {}, timeoutMs);
   const state = parseXml(ZoneGroupState ?? "");
-  // Newer firmware wraps ZoneGroups in a ZoneGroupState element.
+  // Newer firmware adds a ZoneGroupState wrapper.
   const zoneGroups: XmlNode[] = (state.ZoneGroupState ?? state).ZoneGroups?.ZoneGroup ?? [];
   const groups: Group[] = [];
   const members: Member[] = [];
@@ -110,8 +106,7 @@ function toMember(node: XmlNode): Member {
   };
 }
 
-// Cache of known speaker IPs. With the cache, one SOAP call replaces the
-// SSDP search, so most commands start in milliseconds.
+// One cached IP replaces the 1.5 s SSDP search.
 const cacheDir = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "sonos-cli");
 const cacheFile = join(cacheDir, "hosts.json");
 
@@ -130,21 +125,15 @@ async function writeCache(topology: Topology) {
   await Bun.write(cacheFile, ips);
 }
 
-/**
- * Finds the household topology. Order: SONOS_HOST, cached IPs, SSDP, network scan.
- * `refresh` skips the cache.
- */
 export async function loadTopology(refresh = false): Promise<Topology> {
   const hosts = process.env.SONOS_HOST ? [process.env.SONOS_HOST] : refresh ? [] : await readCache();
   for (const ip of hosts) {
     try {
-      // A short timeout: a cached IP can belong to a speaker that is off.
+      // Short timeout: a cached speaker can be off.
       const topology = await getTopology(ip, 1000);
       if (!process.env.SONOS_HOST) await writeCache(topology);
       return topology;
-    } catch {
-      // Speaker is off or has a new IP address. Try the next one.
-    }
+    } catch {}
   }
   let found = await ssdpDiscover();
   if (found.length === 0) found = await scanNetwork();
@@ -153,9 +142,7 @@ export async function loadTopology(refresh = false): Promise<Topology> {
       const topology = await getTopology(ip);
       await writeCache(topology);
       return topology;
-    } catch {
-      // Try the next speaker.
-    }
+    } catch {}
   }
   throw new SonosError("No Sonos speakers found. Set SONOS_HOST=<ip> if discovery does not work in this network.");
 }

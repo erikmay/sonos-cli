@@ -4,9 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { SonosError, isDryRun } from "./soap.ts";
 import { Speaker, type PlayMode } from "./speaker.ts";
 
-// Saves and restores what a group plays, like SoCo snapshot.py: the source,
-// the queue track, the position in the track, the play mode, and the volume
-// of each member. The group itself (which rooms) is not changed.
+// Port of SoCo snapshot.py. Group membership is not part of a snapshot.
 
 export interface MemberState {
   uuid: string;
@@ -21,9 +19,9 @@ export interface Snapshot {
   coordinatorUuid: string;
   mediaUri: string;
   mediaMetadata: string;
-  /** Track number in the queue (1-based). Only used if the source is the queue. */
+  /** 1-based. */
   queuePosition: number;
-  /** Position in the track, "H:MM:SS". Empty for streams without a position. */
+  /** Empty for streams without a position. */
   position: string;
   title: string;
   state: string;
@@ -56,19 +54,18 @@ export async function takeSnapshot(s: Speaker): Promise<Snapshot> {
     queuePosition: track.queuePosition,
     position: track.position,
     title: [track.artist, track.title].filter(Boolean).join(" - "),
-    // TRANSITIONING means that playback starts, so treat it as playing.
     state: state === "TRANSITIONING" ? "PLAYING" : state,
     playMode,
     members: memberStates,
   };
 }
 
-/** Restores a snapshot on the group of `s`. Returns warnings for parts that failed. */
+/** Returns warnings for the parts that failed. */
 export async function restoreSnapshot(s: Speaker, snap: Snapshot): Promise<string[]> {
   const warnings: string[] = [];
   if (!snap.mediaUri) throw new SonosError("The snapshot has no source to restore");
 
-  // Volumes first, so the music does not start at the volume of the announcement.
+  // Volumes first, so the music does not resume at announcement volume.
   for (const m of groupSpeakers(s)) {
     const saved = snap.members.find((x) => x.uuid === m.uuid);
     if (!saved) continue;
@@ -77,7 +74,7 @@ export async function restoreSnapshot(s: Speaker, snap: Snapshot): Promise<strin
   }
 
   if (isQueue(snap.mediaUri)) {
-    // The queue belongs to the coordinator. Use the current one.
+    // The queue belongs to the current coordinator, which can differ from the saved one.
     await s.setSource(`x-rincon-queue:${s.coordinator.uuid}#0`);
     if (snap.queuePosition > 0) await s.seekTrack(snap.queuePosition);
   } else {
@@ -90,7 +87,7 @@ export async function restoreSnapshot(s: Speaker, snap: Snapshot): Promise<strin
     try {
       await s.seek(snap.position);
     } catch {
-      // Some sources accept a seek only while they play. Radio streams do not seek at all.
+      // Some sources seek only while playing. Radio never seeks.
       if (wasPlaying && !isDryRun()) {
         await s.play();
         await Bun.sleep(1000);
@@ -104,7 +101,6 @@ export async function restoreSnapshot(s: Speaker, snap: Snapshot): Promise<strin
   return warnings;
 }
 
-// Named snapshots are stored as JSON, so "restore" also works from a new process.
 const snapshotDir = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "sonos-cli", "snapshots");
 
 function snapshotPath(name: string) {

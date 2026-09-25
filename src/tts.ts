@@ -2,10 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SonosError } from "./soap.ts";
 
-/**
- * Converts text to a WAV file with the macOS "say" command. Returns the file
- * path. The caller deletes the file.
- */
+// The caller deletes the file.
 export async function speechToFile(text: string, voice?: string): Promise<string> {
   if (process.platform !== "darwin") throw new SonosError("Text to speech needs the macOS \"say\" command");
   const path = join(tmpdir(), `sonos-say-${crypto.randomUUID()}.wav`);

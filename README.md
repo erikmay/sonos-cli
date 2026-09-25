@@ -1,5 +1,3 @@
-| `src/snapshot.ts` | save and restore source, track, position and volumes (like SoCo `snapshot.py`) |
-| `src/tts.ts` | text to speech with the macOS `say` command |
 # sonos-cli
 
 Control Sonos speakers in the local network from the command line. The tool
@@ -30,7 +28,6 @@ sonos kantine volume 20           # the first word can be a room name
 sonos -s couch volume +5          # or use -s; names can be partial
 sonos gv -3                       # group volume
 sonos pause | play | toggle | next | prev
-sonos seek 1:30 | seek +30
 sonos favorites                   # list Sonos favorites
 sonos fav "seeed radio"           # play a favorite (by name or number)
 sonos play-uri https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3 "Deutschlandfunk"
@@ -50,9 +47,9 @@ sonos watch                       # live track, state and volume changes
 Run `sonos --help` for all commands.
 
 Options: `--json` for JSON output, `--dry-run` to print changing requests
+without sending them, `--refresh` to ignore the discovery cache.
 Unknown options and extra arguments are errors (exit code 2), so a typo
 such as `--dryrun` never sends a change.
-without sending them, `--refresh` to ignore the discovery cache.
 
 Environment: `SONOS_SPEAKER` sets the default room, `SONOS_HOST` sets the IP
 of one speaker (for networks without multicast).
@@ -79,6 +76,8 @@ sonos ws favorites getFavorites --household
 | `src/speaker.ts` | speaker logic from SoCo `core.py` (transport, volume, EQ, queue, favorites, groups) |
 | `src/ws.ts` | client for the local Control API on port 1443 |
 | `src/fileserver.ts` | HTTP server for `play-file` (speaker IPs only, random path) |
+| `src/snapshot.ts` | save and restore source, track, position and volumes (like SoCo `snapshot.py`) |
+| `src/tts.ts` | text to speech with the macOS `say` command |
 | `src/xml.ts` | XML parsing (Bun.XML, normalized) and DIDL-Lite |
 | `src/cli.ts` | command-line interface |
 

@@ -3,7 +3,7 @@ import { SonosError, fetchText, isDryRun, soap, type SoapArgs, type SoapResult }
 import { wsRequest } from "./ws.ts";
 import { escapeXml, parseDidl, parseXml, text, type DidlObject } from "./xml.ts";
 
-// Play modes as (shuffle, repeat). Same table as SoCo PLAY_MODES.
+// [shuffle, repeat], as SoCo PLAY_MODES.
 export const PLAY_MODES = {
   NORMAL: [false, "off"],
   SHUFFLE_NOREPEAT: [true, "off"],
@@ -15,7 +15,7 @@ export const PLAY_MODES = {
 export type PlayMode = keyof typeof PLAY_MODES;
 export type Repeat = "off" | "all" | "one";
 
-// URI prefixes that identify the music source. Same table as SoCo SOURCES.
+// As SoCo SOURCES.
 const SOURCES: [RegExp, string][] = [
   [/^$/, "NONE"],
   [/^x-file-cifs:/, "LIBRARY"],
@@ -40,7 +40,6 @@ export interface TrackInfo {
   title: string;
   artist: string;
   album: string;
-  /** Radio station or container (playlist) name, if known. */
   station: string;
   position: string;
   duration: string;
@@ -62,7 +61,6 @@ export interface Alarm {
   programUri: string;
 }
 
-/** Parses "90", "1:30" or "0:01:30" to seconds. */
 export function parseTime(value: string): number {
   const parts = value.split(":").map(Number);
   if (parts.some((p) => !Number.isFinite(p) || p < 0)) throw new SonosError(`Invalid time: ${value}`);
@@ -77,11 +75,7 @@ export function formatTime(seconds: number): string {
 
 const onOff = (value: boolean) => (value ? "On" : "Off");
 
-/**
- * One speaker (zone player). Transport, queue, and group volume commands go
- * to the group coordinator, because only the coordinator controls playback.
- * Volume and EQ commands go to the speaker itself.
- */
+// Only the group coordinator accepts transport, queue and group volume commands.
 export class Speaker {
   constructor(
     readonly member: Member,
@@ -117,8 +111,6 @@ export class Speaker {
     return soap(this.coordinator.ip, "GroupRenderingControl", action, { InstanceID: 0, ...args });
   }
 
-  // --- Transport -----------------------------------------------------------
-
   async transportState(): Promise<string> {
     return (await this.av("GetTransportInfo")).CurrentTransportState ?? "UNKNOWN";
   }
@@ -148,10 +140,7 @@ export class Speaker {
     return "play";
   }
 
-  /**
-   * Seeks in the current track: absolute ("1:30", "90"), relative ("+30",
-   * "-15") or as a part of the track length ("50%").
-   */
+  /** "1:30", "90", "+30", "-15" or "50%". */
   async seek(target: string) {
     let seconds: number;
     if (/^[+-]\d+$/.test(target)) {
@@ -167,18 +156,16 @@ export class Speaker {
     await this.av("Seek", { Unit: "REL_TIME", Target: formatTime(seconds) });
   }
 
-  /** Jumps to a track of the queue. `position` starts at 1. */
+  /** `position` is 1-based. */
   async seekTrack(position: number) {
     await this.av("Seek", { Unit: "TRACK_NR", Target: position });
   }
 
-  /** The current source (the queue, a stream, or a file) and its DIDL metadata. */
   async mediaInfo(): Promise<{ uri: string; metadata: string }> {
     const media = await this.av("GetMediaInfo");
     return { uri: media.CurrentURI ?? "", metadata: media.CurrentURIMetaData ?? "" };
   }
 
-  /** Sets the source without starting playback. */
   async setSource(uri: string, metadata = "") {
     await this.av("SetAVTransportURI", { CurrentURI: uri, CurrentURIMetaData: metadata });
   }
@@ -199,11 +186,15 @@ export class Speaker {
       source: musicSource(uri),
       albumArt: meta?.albumArt ? absoluteUrl(meta.albumArt, this.coordinator.ip) : "",
     };
-    // Radio streams put "Artist - Title" into streamContent and the
-    // station name into the media metadata.
+    // Radio: "Artist - Title" is in streamContent, the station in the media metadata.
     const media = await this.av("GetMediaInfo");
     const mediaMeta = parseDidl(media.CurrentURIMetaData ?? "")[0];
-    if (mediaMeta?.title && mediaMeta.title !== info.title) info.station = mediaMeta.title;
+    if (mediaMeta?.upnpClass.startsWith("object.item.audioItem.musicTrack")) {
+      // Without ID3 tags, Sonos titles a file with its URL file name.
+      if (mediaMeta.title && info.title === fileNameOf(uri)) info.title = mediaMeta.title;
+    } else if (mediaMeta?.title && mediaMeta.title !== info.title) {
+      info.station = mediaMeta.title;
+    }
     if (meta?.streamContent) {
       const [artist, ...rest] = meta.streamContent.split(" - ");
       if (rest.length > 0) {
@@ -216,8 +207,6 @@ export class Speaker {
     return info;
   }
 
-  // --- Volume and EQ -------------------------------------------------------
-
   async volume(): Promise<number> {
     return Number((await this.rc("GetVolume", { Channel: "Master" })).CurrentVolume);
   }
@@ -227,7 +216,7 @@ export class Speaker {
   async changeVolume(delta: number): Promise<number> {
     return Number((await this.rc("SetRelativeVolume", { Channel: "Master", Adjustment: delta })).NewVolume);
   }
-  /** Changes the volume in steps over some seconds. Returns the ramp time in seconds. */
+  /** Returns the ramp time in seconds. */
   async rampVolume(volume: number): Promise<number> {
     const result = await this.rc("RampToVolume", {
       Channel: "Master",
@@ -245,8 +234,7 @@ export class Speaker {
     await this.rc("SetMute", { Channel: "Master", DesiredMute: muted });
   }
 
-  // The group volume is relative to the member volumes. A snapshot of the
-  // member ratios must be taken before each read or change.
+  // Group volume is relative to the member volumes, so snapshot the ratios first.
   async groupVolume(): Promise<number> {
     await this.grc("SnapshotGroupVolume");
     return Number((await this.grc("GetGroupVolume")).CurrentVolume);
@@ -285,15 +273,13 @@ export class Speaker {
     await this.rc("SetLoudness", { Channel: "Master", DesiredLoudness: value });
   }
 
-  /** Soundbar settings: "NightMode", "DialogLevel", "SubGain", "SurroundEnable", ... */
+  /** Soundbars only: "NightMode", "DialogLevel", "SubGain", ... */
   async eq(type: string): Promise<string> {
     return (await this.rc("GetEQ", { EQType: type })).CurrentValue ?? "";
   }
   async setEq(type: string, value: string | number) {
     await this.rc("SetEQ", { EQType: type, DesiredValue: value });
   }
-
-  // --- Play mode and sleep timer -------------------------------------------
 
   async playMode(): Promise<PlayMode> {
     return (await this.av("GetTransportSettings")).PlayMode as PlayMode;
@@ -317,19 +303,16 @@ export class Speaker {
     await this.av("SetCrossfadeMode", { CrossfadeMode: value });
   }
 
-  /** Remaining sleep timer in seconds, or null if no timer is set. */
   async sleepTimer(): Promise<number | null> {
     const { RemainingSleepTimerDuration: remaining } = await this.av("GetRemainingSleepTimerDuration");
     return remaining ? parseTime(remaining) : null;
   }
-  /** Sets the sleep timer (max. 23:59:59). `null` cancels the timer. */
+  /** `null` cancels the timer. */
   async setSleepTimer(seconds: number | null) {
     if (seconds !== null && (seconds < 0 || seconds > 86399)) throw new SonosError("Sleep time must be 0..86399 seconds");
     const value = seconds === null ? "" : formatTime(seconds).padStart(8, "0");
     await this.av("ConfigureSleepTimer", { NewSleepTimerDuration: value });
   }
-
-  // --- Queue ---------------------------------------------------------------
 
   private async browse(objectId: string, start = 0, count = 1000): Promise<{ items: DidlObject[]; total: number }> {
     const result = await soap(this.coordinator.ip, "ContentDirectory", "Browse", {
@@ -343,7 +326,6 @@ export class Speaker {
     return { items: parseDidl(result.Result ?? ""), total: Number(result.TotalMatches ?? 0) };
   }
 
-  /** Reads all objects of a ContentDirectory container, page by page. */
   private async browseAll(objectId: string): Promise<DidlObject[]> {
     const items: DidlObject[] = [];
     for (;;) {
@@ -359,17 +341,17 @@ export class Speaker {
   async clearQueue() {
     await this.av("RemoveAllTracksFromQueue");
   }
-  /** Removes a track. `position` starts at 1. */
+  /** `position` is 1-based. */
   async removeFromQueue(position: number) {
     await this.av("RemoveTrackFromQueue", { ObjectID: `Q:0/${position}`, UpdateID: 0 });
   }
-  /** Plays the queue from a track. `position` starts at 1. */
+  /** `position` is 1-based. */
   async playFromQueue(position: number) {
     await this.setSource(`x-rincon-queue:${this.coordinator.uuid}#0`);
     await this.seekTrack(position);
     await this.play();
   }
-  /** Adds a URI to the queue. `position` 0 adds it to the end. Returns the queue position. */
+  /** `position` 0 appends. Returns the queue position. */
   async addToQueue(uri: string, metadata = "", position = 0, asNext = false): Promise<number> {
     const result = await this.av("AddURIToQueue", {
       EnqueuedURI: uri,
@@ -380,22 +362,14 @@ export class Speaker {
     return Number(result.FirstTrackNumberEnqueued ?? 0);
   }
 
-  // --- Favorites, playlists, URIs ------------------------------------------
-
-  /** Sonos favorites (the "My Sonos" list in the app). */
   favorites() {
     return this.browseAll("FV:2");
   }
-  /** Saved Sonos playlists. */
   playlists() {
     return this.browseAll("SQ:");
   }
 
-  /**
-   * Plays a Sonos favorite. The local Control API (WebSocket) can load every
-   * favorite type, including service shortcuts without a URI. If the
-   * WebSocket API is not available, fall back to UPnP like soco-cli.
-   */
+  // loadFavorite handles every favorite type. UPnP is the fallback for firmware without the local API.
   async playFavorite(favorite: DidlObject) {
     const favoriteId = favorite.id.replace(/^FV:2\//, "");
     if (isDryRun()) {
@@ -410,8 +384,7 @@ export class Speaker {
       );
       return;
     } catch (err) {
-      // Shortcuts (for example "Sonos Radio" stations) have no URI, and the
-      // local API does not list them. Only the Sonos app can play them.
+      // Shortcuts (Sonos Radio) have no URI and are missing from the local API.
       if (!favorite.uri) {
         throw new SonosError(`"${favorite.title}" is a Sonos app shortcut without a URI and cannot play locally (${(err as Error).message})`);
       }
@@ -425,10 +398,7 @@ export class Speaker {
     }
   }
 
-  /**
-   * Plays a URI directly (not from the queue). With a title, the URI plays as
-   * a radio station, because Sonos needs metadata for radio streams.
-   */
+  // Radio streams play only with metadata, so a title turns the URI into a station.
   async playUri(uri: string, options: { title?: string; metadata?: string; radio?: boolean } = {}) {
     let metadata = options.metadata ?? "";
     if (!metadata && options.title) metadata = radioMetadata(options.title);
@@ -437,13 +407,11 @@ export class Speaker {
     await this.play();
   }
 
-  /** Plays the line-in of `source` (default: this speaker). */
   async lineIn(source: Speaker = this) {
     await this.av("SetAVTransportURI", { CurrentURI: `x-rincon-stream:${source.uuid}`, CurrentURIMetaData: "" });
     await this.play();
   }
 
-  /** Switches a soundbar to the TV input. */
   async tv() {
     await soap(this.ip, "AVTransport", "SetAVTransportURI", {
       InstanceID: 0,
@@ -452,9 +420,6 @@ export class Speaker {
     });
   }
 
-  // --- Groups --------------------------------------------------------------
-
-  /** Adds this speaker to the group of `target`. */
   async join(target: Speaker) {
     await soap(this.ip, "AVTransport", "SetAVTransportURI", {
       InstanceID: 0,
@@ -463,12 +428,9 @@ export class Speaker {
     });
   }
 
-  /** Removes this speaker from its group. The speaker stops playing. */
   async leave() {
     await soap(this.ip, "AVTransport", "BecomeCoordinatorOfStandaloneGroup", { InstanceID: 0 });
   }
-
-  // --- Device settings -----------------------------------------------------
 
   async statusLight(): Promise<boolean> {
     return (await soap(this.ip, "DeviceProperties", "GetLEDState")).CurrentLEDState === "On";
@@ -476,7 +438,6 @@ export class Speaker {
   async setStatusLight(on: boolean) {
     await soap(this.ip, "DeviceProperties", "SetLEDState", { DesiredLEDState: onOff(on) });
   }
-  /** True if the buttons on the speaker work (not locked). */
   async buttonsEnabled(): Promise<boolean> {
     return (await soap(this.ip, "DeviceProperties", "GetButtonLockState")).CurrentButtonLockState === "Off";
   }
@@ -524,8 +485,7 @@ export function groupName(group: Group): string {
   return [group.coordinator.name, ...others].join(" + ");
 }
 
-// Metadata template for radio streams, from SoCo play_uri(). The desc
-// element names TuneIn as the service, so Sonos shows radio controls.
+// From SoCo play_uri(). The TuneIn service descriptor makes Sonos show radio controls.
 function radioMetadata(title: string): string {
   return (
     '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
@@ -536,7 +496,6 @@ function radioMetadata(title: string): string {
   );
 }
 
-/** DIDL metadata for a single track from a web server, so Sonos shows a title. */
 export function trackMetadata(title: string, uri: string, contentType: string): string {
   return (
     '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
@@ -545,6 +504,14 @@ export function trackMetadata(title: string, uri: string, contentType: string): 
     "<upnp:class>object.item.audioItem.musicTrack</upnp:class>" +
     `<res protocolInfo="http-get:*:${contentType}:*">${escapeXml(uri)}</res></item></DIDL-Lite>`
   );
+}
+
+function fileNameOf(uri: string): string {
+  try {
+    return decodeURIComponent(new URL(uri).pathname.split("/").pop() ?? "");
+  } catch {
+    return "";
+  }
 }
 
 function valid(value: string | undefined): string {

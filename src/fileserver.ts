@@ -21,7 +21,6 @@ export interface FileServer {
 
 const toInt = (ip: string) => ip.split(".").reduce((n, part) => (n << 8) + Number(part), 0) >>> 0;
 
-/** Finds the local IPv4 address in the same network as `speakerIp`. */
 export function localAddressFor(speakerIp: string): string {
   const target = toInt(speakerIp);
   const candidates = Object.values(networkInterfaces())
@@ -36,11 +35,6 @@ export function localAddressFor(speakerIp: string): string {
   return address;
 }
 
-/**
- * Serves one local file over HTTP so a speaker can stream it, like soco-cli
- * play_local_file. Only `allowedIps` (the speakers) get the file. The path
- * has a random token, and the port is chosen by the OS.
- */
 export async function serveFile(path: string, speakerIp: string, allowedIps: string[], title?: string): Promise<FileServer> {
   const file = Bun.file(path);
   if (!(await file.exists())) throw new SonosError(`File not found: ${path}`);
@@ -58,7 +52,7 @@ export async function serveFile(path: string, speakerIp: string, allowedIps: str
       const client = srv.requestIP(req)?.address?.replace(/^::ffff:/, "") ?? "";
       if (!allowed.has(client)) return new Response("Forbidden", { status: 403 });
       if (new URL(req.url).pathname !== filePath) return new Response("Not found", { status: 404 });
-      // Bun answers Range requests for Bun.file bodies. Sonos uses them to seek.
+      // Bun answers the Range requests that Sonos sends to seek.
       return new Response(file, { headers: { "Content-Type": contentType } });
     },
   });
@@ -72,24 +66,16 @@ export async function serveFile(path: string, speakerIp: string, allowedIps: str
 
 export interface WaitOptions {
   pollMs?: number;
-  /**
-   * How long another source may play before the wait ends. play-file keeps
-   * the server running for some minutes, so that an interrupt (for example
-   * an announcement) can return to the file.
-   */
+  /** Keeps serving while an interrupt plays, so the restore can return to the file. */
   replacedGraceMs?: number;
 }
 
-/**
- * Waits until the file at `url` stops, or until another source replaces it.
- * A paused file keeps the wait going, so playback can continue.
- */
 export async function waitForFileEnd(
   s: Speaker,
   url: string,
   { pollMs = 2000, replacedGraceMs = 0 }: WaitOptions = {},
 ): Promise<"ended" | "replaced"> {
-  // Sonos can report STOPPED for a moment while it starts the stream.
+  // Sonos reports STOPPED for a moment while the stream starts.
   const startGraceMs = 6000;
   let started = Date.now();
   let seenPlaying = false;
@@ -106,8 +92,7 @@ export async function waitForFileEnd(
         continue;
       }
       if (replacedSince !== undefined) {
-        // The file is back after an interrupt. The restore sets the source
-        // before it seeks and plays, so a short STOPPED is not the end.
+        // Back after an interrupt: the restore passes through STOPPED before it plays.
         replacedSince = undefined;
         started = Date.now();
         seenPlaying = false;
@@ -115,7 +100,6 @@ export async function waitForFileEnd(
       if (state === "PLAYING") seenPlaying = true;
       if (state === "STOPPED" && (seenPlaying || Date.now() - started > startGraceMs)) return "ended";
     } catch (err) {
-      // Wi-Fi can drop single requests. Give up after about 15 failed polls.
       if (++failures >= 15) throw err;
     }
   }

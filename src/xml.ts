@@ -1,4 +1,4 @@
-// Elements that can repeat. parseXml always returns arrays for them.
+// Bun.XML returns an array only when an element repeats.
 const ARRAY_TAGS = new Set([
   "item",
   "container",
@@ -14,18 +14,12 @@ const ARRAY_TAGS = new Set([
   "allowedValue",
 ]);
 
-// Control characters that XML 1.0 does not allow. Some track titles contain
-// them, so SoCo removes them before a second parse attempt.
+// Some track titles contain control characters that XML 1.0 forbids (SoCo strips them too).
 const ILLEGAL_XML_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g;
 
 export type XmlNode = Record<string, any>;
 
-/**
- * Parses XML with Bun.XML. The result is normalized: namespace prefixes and
- * xmlns attributes are removed ("dc:title" becomes "title"), and elements in
- * ARRAY_TAGS are always arrays. Attributes have the prefix "@", text next to
- * attributes is in "#text", and all values are strings.
- */
+// Keys lose their namespace prefix ("dc:title" -> "title"); attributes keep "@".
 export function parseXml(xml: string): XmlNode {
   let parsed: unknown;
   try {
@@ -65,7 +59,6 @@ export function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-/** Returns the text of a node that can be a plain string or `{ "#text": ... }`. */
 export function text(node: unknown): string {
   if (node == null) return "";
   if (typeof node === "string") return node;
@@ -85,16 +78,13 @@ export interface DidlObject {
   protocolInfo: string;
   duration: string;
   albumArt: string;
-  /** Sonos favorites: DIDL metadata of the referenced object. */
   resMD: string;
-  /** Sonos favorites: "instantPlay" or "shortcut". */
+  /** Favorites: "instantPlay" or "shortcut" (app-only, no URI). */
   type: string;
   description: string;
-  /** Radio streams: current "artist - title" text. */
   streamContent: string;
 }
 
-/** Parses a DIDL-Lite document (queue, favorites, track metadata). */
 export function parseDidl(xml: string): DidlObject[] {
   if (!xml || xml === "NOT_IMPLEMENTED") return [];
   const root = parseXml(xml)["DIDL-Lite"];

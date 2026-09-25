@@ -11,12 +11,10 @@ import { parseXml, type DidlObject } from "./xml.ts";
 
 interface Context {
   topology: Topology;
-  /** Resolves the target speaker (from -s, the leading room name, or the default). */
   speaker: () => Speaker;
   find: (query: string) => Speaker;
   json: boolean;
   flags: Set<string>;
-  /** Flags with a value, for example --volume 30. */
   options: Map<string, string>;
 }
 
@@ -26,8 +24,6 @@ interface Command {
   help: string;
   run: (ctx: Context, args: string[]) => Promise<void>;
 }
-
-// --- Output helpers --------------------------------------------------------
 
 function out(ctx: Context, value: unknown, human?: () => string) {
   if (ctx.json) console.log(JSON.stringify(value, null, 2));
@@ -49,8 +45,6 @@ function describeTrack(t: Awaited<ReturnType<Speaker["currentTrack"]>>): string 
   return parts.join("  ");
 }
 
-// --- Argument helpers ------------------------------------------------------
-
 function bool(value: string): boolean {
   if (/^(on|true|yes|1)$/i.test(value)) return true;
   if (/^(off|false|no|0)$/i.test(value)) return false;
@@ -63,7 +57,7 @@ function int(value: string | undefined, name = "value"): number {
   return n;
 }
 
-/** Parses "30m", "1h30m", "90s", "1:30:00" or a plain number of minutes. */
+/** A plain number means minutes. */
 function parseDuration(value: string): number {
   if (value.includes(":")) return parseTime(value);
   if (/^\d+$/.test(value)) return Number(value) * 60;
@@ -72,7 +66,6 @@ function parseDuration(value: string): number {
   return Number(match[1] ?? 0) * 3600 + Number(match[2] ?? 0) * 60 + Number(match[3] ?? 0);
 }
 
-/** Runs a getter, or a setter if an argument is given. Arguments "+n"/"-n" change relative. */
 async function level(
   ctx: Context,
   args: string[],
@@ -113,10 +106,7 @@ function pickFavorite(favorites: DidlObject[], query: string): DidlObject {
   throw new SonosError(`Favorite "${query}" is ambiguous: ${matches.map((f) => f.title).join(", ")}`);
 }
 
-// --- Commands --------------------------------------------------------------
-
 const commands: Command[] = [
-  // Discovery and status
   {
     names: ["speakers", "discover", "ls"],
     usage: "speakers",
@@ -179,7 +169,6 @@ const commands: Command[] = [
     run: async (ctx) => out(ctx, await ctx.speaker().transportState()),
   },
 
-  // Transport
   { names: ["play"], usage: "play", help: "Start playback", run: async (ctx) => ctx.speaker().play() },
   { names: ["pause"], usage: "pause", help: "Pause playback", run: async (ctx) => ctx.speaker().pause() },
   { names: ["stop"], usage: "stop", help: "Stop playback", run: async (ctx) => ctx.speaker().stop() },
@@ -201,7 +190,6 @@ const commands: Command[] = [
     },
   },
 
-  // Volume and EQ
   {
     names: ["volume", "vol", "v"],
     usage: "volume [0-100|+n|-n]",
@@ -293,7 +281,6 @@ const commands: Command[] = [
     },
   },
 
-  // Play mode and sleep timer
   {
     names: ["mode"],
     usage: `mode [${Object.keys(PLAY_MODES).join("|")}]`,
@@ -353,7 +340,6 @@ const commands: Command[] = [
     },
   },
 
-  // Queue
   {
     names: ["queue", "q"],
     usage: "queue [list|clear|play <n>|remove <n>|add <uri>]",
@@ -390,7 +376,6 @@ const commands: Command[] = [
     },
   },
 
-  // Favorites, playlists, URIs, inputs
   {
     names: ["favorites", "favs", "lf"],
     usage: "favorites",
@@ -448,15 +433,13 @@ const commands: Command[] = [
         return;
       }
       process.on("SIGINT", async () => {
-        // Stop only if our file still plays. Without the server, it cannot continue.
+        // Without the server, our file cannot continue. Other music can.
         if ((await s.mediaInfo().catch(() => ({ uri: "" }))).uri === server.url) await s.stop().catch(() => {});
         server.stop();
         process.exit(130);
       });
       await s.playUri(server.url, { metadata: trackMetadata(server.title, server.url, server.contentType) });
       console.error(`Playing "${server.title}" on ${groupName(s.group)}. Press Ctrl-C to stop.`);
-      // Keep the file available for 10 minutes after another source starts,
-      // so that "interrupt" and "say" can return to it.
       const result = await waitForFileEnd(s, server.url, { replacedGraceMs: 10 * 60_000 });
       console.error(result === "ended" ? "Playback ended." : "Another source replaced the file.");
       server.stop();
@@ -525,7 +508,6 @@ const commands: Command[] = [
   },
   { names: ["tv"], usage: "tv", help: "Switch a soundbar to the TV input", run: async (ctx) => ctx.speaker().tv() },
 
-  // Groups
   {
     names: ["join", "group"],
     usage: "join <room>",
@@ -567,7 +549,6 @@ const commands: Command[] = [
     },
   },
 
-  // Device settings
   {
     names: ["light"],
     usage: "light [on|off]",
@@ -603,7 +584,6 @@ const commands: Command[] = [
     },
   },
 
-  // Exploration
   {
     names: ["actions", "describe"],
     usage: "actions [Service]",
@@ -655,7 +635,7 @@ const commands: Command[] = [
       if (!namespace || !command) throw new SonosError("Usage: ws <namespace> <command> [json-body]");
       const s = ctx.speaker();
       const ns = namespace.includes(":") ? namespace : `${namespace}:1`;
-      // Player commands go to the player itself; group commands to the coordinator.
+      // A player command sent to another speaker fails with ERROR_INVALID_OBJECT_ID.
       const ip = ctx.flags.has("player") ? s.ip : s.coordinator.ip;
       if (isDryRun() && !/^(get|subscribe|unsubscribe)/.test(command)) {
         console.error(`[dry-run] ${ip} ${ns}.${command} ${body ?? "{}"}`);
@@ -721,12 +701,7 @@ function describeSnapshot(snap: Snapshot): string {
   return `${snap.title || snap.mediaUri}${at}, ${snap.state}, ${volumes}`;
 }
 
-/**
- * Plays a local file on the group, waits for its end, and restores the music
- * that played before (source, track, position, volumes). The snapshot is also
- * saved as "last-interrupt", so "snapshot restore last-interrupt" can repair
- * a broken run.
- */
+// The "last-interrupt" snapshot lets a user repair a crashed run.
 async function interruptWith(ctx: Context, path: string, title?: string) {
   const s = ctx.speaker();
   const volume = ctx.options.has("volume") ? int(ctx.options.get("volume"), "--volume") : undefined;
@@ -752,7 +727,6 @@ async function interruptWith(ctx: Context, path: string, title?: string) {
     if (!isDryRun()) {
       console.error(`Playing "${server.title}" on ${groupName(s.group)} ...`);
       if ((await waitForFileEnd(s, server.url, { pollMs: 500 })) === "replaced") {
-        // Somebody started other music. Do not overwrite it.
         done = true;
         console.error("Another source started. The previous music is not restored.");
       }
@@ -771,8 +745,6 @@ function resolveService(name: string): ServiceName {
 }
 
 const commandByName = new Map(commands.flatMap((c) => c.names.map((n) => [n, c] as const)));
-
-// --- Speaker lookup --------------------------------------------------------
 
 function makeFinder(topology: Topology) {
   const visible = topology.groups.flatMap((g) => g.members.map((m) => ({ m, g })));
@@ -806,13 +778,10 @@ function defaultSpeaker(topology: Topology, find: (q: string) => Speaker): Speak
   );
 }
 
-// --- Main ------------------------------------------------------------------
-
 class UsageError extends SonosError {}
 
-// Most commands take a fixed number of arguments. Extra arguments are an
-// error, so that a misplaced word (for example after "--") never changes a
-// value by accident. Commands that are not listed join their arguments.
+// A stray word (for example "--dry-run" after "--") must fail, never change a value.
+// Unlisted commands join their arguments.
 const MAX_ARGS: Record<string, number> = {
   ...Object.fromEntries(
     ["speakers", "status", "info", "track", "state", "play", "pause", "stop", "toggle", "next", "prev", "favorites",
@@ -871,7 +840,7 @@ async function main(argv: string[]) {
     const long = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
     const name = long ? long[1]! : arg === "-s" ? "speaker" : arg === "-h" ? "help" : undefined;
     if (name === undefined) {
-      // Negative numbers ("volume -3") are arguments, other "-x" are unknown flags.
+      // "volume -3" is an argument.
       if (/^-[a-zA-Z]/.test(arg)) throw new UsageError(`Unknown option "${arg}"`);
       positional.push(arg);
     } else if (VALUE_OPTIONS.has(name)) {
@@ -891,7 +860,7 @@ async function main(argv: string[]) {
   }
   setDryRun(flags.has("dry-run"));
 
-  // "sonos Kantine volume 20": the first word is a room if it is not a command.
+  // "sonos Kantine volume 20"
   let [name, ...args] = positional;
   if (!commandByName.has(name!) && positional.length > 1 && commandByName.has(positional[1]!)) {
     speakerQuery = name;
@@ -921,6 +890,5 @@ async function main(argv: string[]) {
 
 main(Bun.argv.slice(2)).catch((err) => {
   console.error(err instanceof SonosError ? `Error: ${err.message}` : err);
-  // Exit code 2 for usage errors, as most CLIs do.
   process.exit(err instanceof UsageError ? 2 : 1);
 });

@@ -146,7 +146,7 @@ S2 firmware also runs the Sonos Control API locally. It is the same API as
 the documented cloud API (https://docs.sonos.com/docs/control), but without
 OAuth. SoCo does not use it.
 
-- URL: `wss://<ip>:1443/websocket/api` (self-signed certificate)
+- URL: `wss://<ip>:1443/websocket/api` (certificate from a private Sonos CA, "Sonos Device Authentication Root CA")
 - Headers: `X-Sonos-Api-Key: 123e4567-e89b-12d3-a456-426655440000` (the
   public key that the Sonos app and Home Assistant send) and
   `Sec-WebSocket-Protocol: v1.api.smartspeaker.audio`

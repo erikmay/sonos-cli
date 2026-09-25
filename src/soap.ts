@@ -1,8 +1,5 @@
 import { escapeXml, parseXml, type XmlNode } from "./xml.ts";
 
-// Sonos speakers are UPnP devices. Every service accepts SOAP requests on
-// HTTP port 1400. Service type and control path come from
-// http://<ip>:1400/xml/device_description.xml.
 export const SERVICES = {
   AVTransport: { type: "urn:schemas-upnp-org:service:AVTransport:1", path: "/MediaRenderer/AVTransport" },
   RenderingControl: { type: "urn:schemas-upnp-org:service:RenderingControl:1", path: "/MediaRenderer/RenderingControl" },
@@ -26,7 +23,6 @@ export type SoapResult = Record<string, string>;
 export const PORT = 1400;
 const TIMEOUT_MS = 5000;
 
-// Error codes from the UPnP device architecture and the AVTransport spec.
 const UPNP_ERRORS: Record<string, string> = {
   "400": "Bad Request",
   "401": "Invalid Action",
@@ -51,7 +47,6 @@ export class SonosError extends Error {}
 
 let dryRun = false;
 
-/** In dry-run mode, state-changing actions are printed but not sent. */
 export function setDryRun(value: boolean) {
   dryRun = value;
 }
@@ -60,8 +55,7 @@ export function isDryRun() {
   return dryRun;
 }
 
-// Actions that only read state. SnapshotGroupVolume stores the volume ratio
-// of the group members before a group volume read and changes nothing audible.
+// SnapshotGroupVolume only records the member volume ratios, so it is safe in dry-run.
 const READ_ONLY_ACTION = /^(Get|List|Browse|Search|SnapshotGroupVolume$)/;
 
 export function buildEnvelope(service: ServiceName, action: string, args: SoapArgs): string {
@@ -78,10 +72,7 @@ export function buildEnvelope(service: ServiceName, action: string, args: SoapAr
   );
 }
 
-/**
- * Sends one UPnP action to a speaker. Argument order must match the order in
- * the service description (SCPD), so pass `args` in that order.
- */
+// Speakers reject arguments that are not in SCPD order.
 export async function soap(
   ip: string,
   service: ServiceName,
