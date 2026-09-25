@@ -1,24 +1,42 @@
 {
   "name": "sonos-cli",
   "version": "0.1.0",
-  "devDependencies": {
-    "@types/bun": "latest"
+  "description": "Control Sonos speakers in the local network (UPnP/SOAP and local Control API). A Bun port of the SoCo logic.",
+  "keywords": [
+    "sonos",
+    "cli",
+    "upnp",
+    "soco",
+    "bun",
+    "smart-speaker"
+  ],
+  "license": "MIT",
+  "author": "Erik May",
+  "homepage": "https://github.com/erikmay/sonos-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/erikmay/sonos-cli.git"
   },
-  "peerDependencies": {
-    "typescript": "^7"
+  "bugs": {
+    "url": "https://github.com/erikmay/sonos-cli/issues"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "bun": ">=1.4.0"
   },
   "bin": {
     "sonos": "./src/cli.ts"
   },
-  "description": "Control Sonos speakers in the local network (UPnP/SOAP and local Control API). A Bun port of the SoCo logic.",
-  "private": true,
   "scripts": {
     "start": "bun src/cli.ts",
     "typecheck": "tsc --noEmit",
     "build": "bun build src/cli.ts --compile --outfile dist/sonos"
   },
-  "type": "module",
-  "engines": {
-    "bun": ">=1.4.0"
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
   }
 }

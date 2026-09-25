@@ -4,8 +4,8 @@ Bun CLI for Sonos speakers in the local network, ported from SoCo.
 
 ## Live speakers
 
-The office speakers are live: people listen to them all day. Every command
-reaches real hardware.
+The speakers are live: people listen to them. Every command reaches real
+hardware.
 
 - Verify a change with read commands (`status`, `track`, `raw … Get…`,
   `ws … get…`) and `--dry-run`.

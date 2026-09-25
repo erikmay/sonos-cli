@@ -6,17 +6,27 @@ with commands like [soco-cli](https://github.com/avantrec/soco-cli). It also
 uses the local Sonos Control API (WebSocket) for favorites and live events.
 
 No cloud account, no Python and no runtime dependencies are necessary.
-XML parsing uses `Bun.XML` (Bun 1.4 or newer).
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for how the protocols work.
+
+## Requirements
+
+- [Bun](https://bun.com) 1.4 or newer (uses `Bun.XML`)
+- The computer and the speakers in the same network
+- `say` (text to speech) needs macOS
 
 ## Install
 
 ```sh
+bun install -g github:erikmay/sonos-cli   # installs the "sonos" command
+```
+
+From a clone:
+
+```sh
 bun install
 bun link            # installs the "sonos" command
-# or build a single binary:
-bun run build       # -> dist/sonos
+bun run build       # or: a single binary in dist/sonos
 ```
 
 ## Usage
@@ -87,3 +97,14 @@ Music library search, music service browsing (SMAPI), playlist editing,
 alarm editing, stereo pairs and home theater setup, playlists of local
 files (m3u, directories), and GENA event subscriptions (replaced by `watch`).
 Use `sonos raw` for UPnP actions without a command.
+
+## Disclaimer
+
+This project is not affiliated with or endorsed by Sonos, Inc. It uses the
+UPnP interface and the undocumented local Control API of the speakers. Sonos
+can change or close these interfaces with a firmware update.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Parts are ported from SoCo (MIT), see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
