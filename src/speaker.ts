@@ -148,21 +148,39 @@ export class Speaker {
     return "play";
   }
 
-  /** Seeks to an absolute time ("1:30", "90") or relative ("+30", "-15"). */
+  /**
+   * Seeks in the current track: absolute ("1:30", "90"), relative ("+30",
+   * "-15") or as a part of the track length ("50%").
+   */
   async seek(target: string) {
     let seconds: number;
     if (/^[+-]\d+$/.test(target)) {
       const { RelTime } = await this.av("GetPositionInfo");
       seconds = parseTime(RelTime ?? "0") + Number(target);
+    } else if (/^\d+(\.\d+)?%$/.test(target)) {
+      const duration = valid((await this.av("GetPositionInfo")).TrackDuration);
+      if (!duration) throw new SonosError("The current track has no known length");
+      seconds = (parseTime(duration) * Math.min(100, parseFloat(target))) / 100;
     } else {
       seconds = parseTime(target);
     }
     await this.av("Seek", { Unit: "REL_TIME", Target: formatTime(seconds) });
   }
 
-  /** The URI of the current source (the queue, a stream, or a file). */
-  async mediaUri(): Promise<string> {
-    return (await this.av("GetMediaInfo")).CurrentURI ?? "";
+  /** Jumps to a track of the queue. `position` starts at 1. */
+  async seekTrack(position: number) {
+    await this.av("Seek", { Unit: "TRACK_NR", Target: position });
+  }
+
+  /** The current source (the queue, a stream, or a file) and its DIDL metadata. */
+  async mediaInfo(): Promise<{ uri: string; metadata: string }> {
+    const media = await this.av("GetMediaInfo");
+    return { uri: media.CurrentURI ?? "", metadata: media.CurrentURIMetaData ?? "" };
+  }
+
+  /** Sets the source without starting playback. */
+  async setSource(uri: string, metadata = "") {
+    await this.av("SetAVTransportURI", { CurrentURI: uri, CurrentURIMetaData: metadata });
   }
 
   async currentTrack(): Promise<TrackInfo> {
@@ -347,8 +365,8 @@ export class Speaker {
   }
   /** Plays the queue from a track. `position` starts at 1. */
   async playFromQueue(position: number) {
-    await this.av("SetAVTransportURI", { CurrentURI: `x-rincon-queue:${this.coordinator.uuid}#0`, CurrentURIMetaData: "" });
-    await this.av("Seek", { Unit: "TRACK_NR", Target: position });
+    await this.setSource(`x-rincon-queue:${this.coordinator.uuid}#0`);
+    await this.seekTrack(position);
     await this.play();
   }
   /** Adds a URI to the queue. `position` 0 adds it to the end. Returns the queue position. */

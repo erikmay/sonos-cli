@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 import { loadTopology, type Topology } from "./discovery.ts";
 import { SERVICES, SonosError, fetchText, isDryRun, setDryRun, soap, type ServiceName } from "./soap.ts";
-import { serveFile } from "./fileserver.ts";
+import { unlink } from "node:fs/promises";
+import { serveFile, waitForFileEnd } from "./fileserver.ts";
+import { groupSpeakers, loadSnapshot, restoreSnapshot, saveSnapshot, takeSnapshot, type Snapshot } from "./snapshot.ts";
+import { speechToFile } from "./tts.ts";
 import { PLAY_MODES, Speaker, formatTime, groupName, parseTime, trackMetadata, type PlayMode, type Repeat } from "./speaker.ts";
 import { SonosWebSocket, type WsHeader } from "./ws.ts";
 import { parseXml, type DidlObject } from "./xml.ts";
@@ -13,6 +16,8 @@ interface Context {
   find: (query: string) => Speaker;
   json: boolean;
   flags: Set<string>;
+  /** Flags with a value, for example --volume 30. */
+  options: Map<string, string>;
 }
 
 interface Command {
@@ -188,8 +193,8 @@ const commands: Command[] = [
   { names: ["prev", "previous"], usage: "prev", help: "Go to the previous track", run: async (ctx) => ctx.speaker().previous() },
   {
     names: ["seek"],
-    usage: "seek <1:30|90|+30|-15>",
-    help: "Seek to a position in the track, or forward/back in seconds",
+    usage: "seek <1:30|90|+30|-15|50%>",
+    help: "Seek to a position in the track, forward/back in seconds, or to a percentage",
     run: async (ctx, [target]) => {
       if (!target) throw new SonosError("Usage: seek <time>");
       await ctx.speaker().seek(target);
@@ -444,14 +449,69 @@ const commands: Command[] = [
       }
       process.on("SIGINT", async () => {
         // Stop only if our file still plays. Without the server, it cannot continue.
-        if ((await s.mediaUri().catch(() => "")) === server.url) await s.stop().catch(() => {});
+        if ((await s.mediaInfo().catch(() => ({ uri: "" }))).uri === server.url) await s.stop().catch(() => {});
         server.stop();
         process.exit(130);
       });
       await s.playUri(server.url, { metadata: trackMetadata(server.title, server.url, server.contentType) });
       console.error(`Playing "${server.title}" on ${groupName(s.group)}. Press Ctrl-C to stop.`);
-      await waitForFileEnd(s, server.url);
+      // Keep the file available for 10 minutes after another source starts,
+      // so that "interrupt" and "say" can return to it.
+      const result = await waitForFileEnd(s, server.url, { replacedGraceMs: 10 * 60_000 });
+      console.error(result === "ended" ? "Playback ended." : "Another source replaced the file.");
       server.stop();
+    },
+  },
+  {
+    names: ["interrupt", "insert"],
+    usage: "interrupt <path> [--volume n]",
+    help: "Play a local file, then return to the previous music at the same position",
+    run: async (ctx, args) => {
+      const path = args.join(" ");
+      if (!path) throw new SonosError("Usage: interrupt <path>");
+      await interruptWith(ctx, path);
+    },
+  },
+  {
+    names: ["say", "tts"],
+    usage: 'say "<text>" [--voice Anna] [--volume n]',
+    help: "Speak a text (macOS say), then return to the previous music at the same position",
+    run: async (ctx, args) => {
+      const text = args.join(" ");
+      if (!text) throw new SonosError('Usage: say "<text>"');
+      const path = await speechToFile(text, ctx.options.get("voice"));
+      try {
+        await interruptWith(ctx, path, "Announcement");
+      } finally {
+        await unlink(path).catch(() => {});
+      }
+    },
+  },
+  {
+    names: ["snapshot", "snap"],
+    usage: "snapshot [save|restore|show] [name]",
+    help: "Save what the group plays (source, track, position, volumes), or restore it",
+    run: async (ctx, [sub = "save", name = "default"]) => {
+      const s = ctx.speaker();
+      switch (sub) {
+        case "save": {
+          const snap = await takeSnapshot(s);
+          await saveSnapshot(name, snap);
+          return out(ctx, snap, () => `Saved "${name}": ${describeSnapshot(snap)}`);
+        }
+        case "show": {
+          const snap = await loadSnapshot(name);
+          return out(ctx, snap, () => describeSnapshot(snap));
+        }
+        case "restore": {
+          const snap = await loadSnapshot(name);
+          for (const w of await restoreSnapshot(s, snap)) console.error(`Warning: ${w}`);
+          if (!isDryRun()) out(ctx, snap.title, () => `Restored: ${describeSnapshot(snap)}`);
+          return;
+        }
+        default:
+          throw new SonosError(`Unknown snapshot command: ${sub}`);
+      }
     },
   },
   {
@@ -655,28 +715,53 @@ const commands: Command[] = [
   },
 ];
 
+function describeSnapshot(snap: Snapshot): string {
+  const at = snap.position ? ` at ${snap.position}` : "";
+  const volumes = snap.members.map((m) => `${m.name} ${m.volume}${m.muted ? " (muted)" : ""}`).join(", ");
+  return `${snap.title || snap.mediaUri}${at}, ${snap.state}, ${volumes}`;
+}
+
 /**
- * Waits until the file stops, or until another source replaces it. A paused
- * file keeps the server running, so playback can continue.
+ * Plays a local file on the group, waits for its end, and restores the music
+ * that played before (source, track, position, volumes). The snapshot is also
+ * saved as "last-interrupt", so "snapshot restore last-interrupt" can repair
+ * a broken run.
  */
-async function waitForFileEnd(s: Speaker, url: string) {
-  const POLL_MS = 2000;
-  // Sonos can report STOPPED for a moment while it starts the stream.
-  const startGraceMs = 6000;
-  const started = Date.now();
-  let failures = 0;
-  for (;;) {
-    await Bun.sleep(POLL_MS);
-    try {
-      const [uri, state] = await Promise.all([s.mediaUri(), s.transportState()]);
-      failures = 0;
-      if (uri !== url) return console.error("Another source replaced the file.");
-      if (state === "STOPPED" && Date.now() - started > startGraceMs) return console.error("Playback ended.");
-    } catch (err) {
-      // Wi-Fi can drop single requests. Give up after about 30 seconds.
-      if (++failures >= 15) throw err;
+async function interruptWith(ctx: Context, path: string, title?: string) {
+  const s = ctx.speaker();
+  const volume = ctx.options.has("volume") ? int(ctx.options.get("volume"), "--volume") : undefined;
+  const snap = await takeSnapshot(s);
+  if (!isDryRun()) await saveSnapshot("last-interrupt", snap);
+  const server = await serveFile(path, s.coordinator.ip, ctx.topology.members.map((m) => m.ip), title);
+
+  let done = false;
+  const restore = async () => {
+    if (done) return;
+    done = true;
+    for (const w of await restoreSnapshot(s, snap)) console.error(`Warning: ${w}`);
+  };
+  process.on("SIGINT", async () => {
+    await restore().catch((e) => console.error(`Error: ${e.message}`));
+    server.stop();
+    process.exit(130);
+  });
+
+  try {
+    if (volume !== undefined) for (const m of groupSpeakers(s)) await m.setVolume(volume);
+    await s.playUri(server.url, { metadata: trackMetadata(server.title, server.url, server.contentType) });
+    if (!isDryRun()) {
+      console.error(`Playing "${server.title}" on ${groupName(s.group)} ...`);
+      if ((await waitForFileEnd(s, server.url, { pollMs: 500 })) === "replaced") {
+        // Somebody started other music. Do not overwrite it.
+        done = true;
+        console.error("Another source started. The previous music is not restored.");
+      }
     }
+  } finally {
+    await restore();
+    server.stop();
   }
+  if (!isDryRun() && snap.mediaUri) console.error(`Back to: ${describeSnapshot(snap)}`);
 }
 
 function resolveService(name: string): ServiceName {
@@ -723,6 +808,28 @@ function defaultSpeaker(topology: Topology, find: (q: string) => Speaker): Speak
 
 // --- Main ------------------------------------------------------------------
 
+class UsageError extends SonosError {}
+
+// Most commands take a fixed number of arguments. Extra arguments are an
+// error, so that a misplaced word (for example after "--") never changes a
+// value by accident. Commands that are not listed join their arguments.
+const MAX_ARGS: Record<string, number> = {
+  ...Object.fromEntries(
+    ["speakers", "status", "info", "track", "state", "play", "pause", "stop", "toggle", "next", "prev", "favorites",
+     "playlists", "tv", "leave", "party", "ungroup-all", "alarms", "watch"].map((n) => [n, 0]),
+  ),
+  ...Object.fromEntries(
+    ["seek", "volume", "group-volume", "ramp", "mute", "group-mute", "bass", "treble", "loudness", "night", "dialog",
+     "mode", "shuffle", "repeat", "crossfade", "sleep", "light", "buttons", "line-in", "actions"].map((n) => [n, 1]),
+  ),
+  queue: 2,
+  snapshot: 2,
+  ws: 3,
+};
+
+const BOOLEAN_FLAGS = new Set(["help", "json", "dry-run", "refresh", "radio", "player", "household"]);
+const VALUE_OPTIONS = new Set(["speaker", "volume", "voice"]);
+
 function usage(): string {
   const lines = commands.map((c) => `  ${c.usage.padEnd(48)} ${c.help}`);
   return `sonos-cli - control Sonos speakers in the local network
@@ -738,6 +845,8 @@ Options:
   --dry-run              Print state-changing requests, do not send them
   --refresh              Ignore the discovery cache
   --radio                play-uri: force radio mode (x-rincon-mp3radio)
+  --volume <n>           interrupt, say: volume of all group members during the insert
+  --voice <name>         say: macOS voice (list: say -v '?'), for example Anna
   --player, --household  ws: target the player or the household (default: group)
   -h, --help             Show this help
 
@@ -752,14 +861,30 @@ Transport and queue commands always go to the group coordinator.`;
 async function main(argv: string[]) {
   const positional: string[] = [];
   const flags = new Set<string>();
-  let speakerQuery: string | undefined;
+  const options = new Map<string, string>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (arg === "-s" || arg === "--speaker") speakerQuery = argv[++i];
-    else if (arg === "-h" || arg === "--help") flags.add("help");
-    else if (arg.startsWith("--") && arg.length > 2) flags.add(arg.slice(2));
-    else positional.push(arg);
+    if (arg === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
+    const long = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
+    const name = long ? long[1]! : arg === "-s" ? "speaker" : arg === "-h" ? "help" : undefined;
+    if (name === undefined) {
+      // Negative numbers ("volume -3") are arguments, other "-x" are unknown flags.
+      if (/^-[a-zA-Z]/.test(arg)) throw new UsageError(`Unknown option "${arg}"`);
+      positional.push(arg);
+    } else if (VALUE_OPTIONS.has(name)) {
+      const value = long?.[2] ?? argv[++i];
+      if (value === undefined || value === "") throw new UsageError(`Option --${name} needs a value`);
+      options.set(name, value);
+    } else if (BOOLEAN_FLAGS.has(name) && long?.[2] === undefined) {
+      flags.add(name);
+    } else {
+      throw new UsageError(`Unknown option "${arg}". Run "sonos --help".`);
+    }
   }
+  let speakerQuery = options.get("speaker");
   if (flags.has("help") || positional.length === 0) {
     console.log(usage());
     return;
@@ -773,7 +898,11 @@ async function main(argv: string[]) {
     [name, ...args] = positional.slice(1);
   }
   const command = commandByName.get(name!);
-  if (!command) throw new SonosError(`Unknown command "${name}". Run "sonos --help".`);
+  if (!command) throw new UsageError(`Unknown command "${name}". Run "sonos --help".`);
+  const maxArgs = MAX_ARGS[command.names[0]!];
+  if (maxArgs !== undefined && args.length > maxArgs) {
+    throw new UsageError(`Too many arguments for "${name}": ${args.slice(maxArgs).join(" ")}. Usage: sonos ${command.usage}`);
+  }
 
   const refresh = flags.has("refresh") || command.names[0] === "speakers";
   const topology = await loadTopology(refresh);
@@ -784,6 +913,7 @@ async function main(argv: string[]) {
     find,
     json: flags.has("json"),
     flags,
+    options,
     speaker: () => (cached ??= speakerQuery ? find(speakerQuery) : defaultSpeaker(topology, find)),
   };
   await command.run(ctx, args);
@@ -791,5 +921,6 @@ async function main(argv: string[]) {
 
 main(Bun.argv.slice(2)).catch((err) => {
   console.error(err instanceof SonosError ? `Error: ${err.message}` : err);
-  process.exit(1);
+  // Exit code 2 for usage errors, as most CLIs do.
+  process.exit(err instanceof UsageError ? 2 : 1);
 });

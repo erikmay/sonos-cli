@@ -1,3 +1,5 @@
+| `src/snapshot.ts` | save and restore source, track, position and volumes (like SoCo `snapshot.py`) |
+| `src/tts.ts` | text to speech with the macOS `say` command |
 # sonos-cli
 
 Control Sonos speakers in the local network from the command line. The tool
@@ -33,6 +35,10 @@ sonos favorites                   # list Sonos favorites
 sonos fav "seeed radio"           # play a favorite (by name or number)
 sonos play-uri https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3 "Deutschlandfunk"
 sonos play-file ~/Music/track.mp3    # serves the file over HTTP until it ends
+sonos say "Mittagessen ist fertig" --voice Anna --volume 25   # announce, then resume
+sonos interrupt ~/Music/jingle.mp3                   # insert a file, then resume
+sonos snapshot save && ... && sonos snapshot restore  # manual save and restore
+sonos seek 50%                    # also: seek 1:30, seek +30, seek -15
 sonos queue | queue play 3 | queue clear
 sonos sleep 30m | sleep off
 sonos couch join kantine          # grouping
@@ -44,6 +50,8 @@ sonos watch                       # live track, state and volume changes
 Run `sonos --help` for all commands.
 
 Options: `--json` for JSON output, `--dry-run` to print changing requests
+Unknown options and extra arguments are errors (exit code 2), so a typo
+such as `--dryrun` never sends a change.
 without sending them, `--refresh` to ignore the discovery cache.
 
 Environment: `SONOS_SPEAKER` sets the default room, `SONOS_HOST` sets the IP

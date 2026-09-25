@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
 import { basename, extname } from "node:path";
 import { SonosError } from "./soap.ts";
+import type { Speaker } from "./speaker.ts";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".mp3": "audio/mpeg",
@@ -40,7 +41,7 @@ export function localAddressFor(speakerIp: string): string {
  * play_local_file. Only `allowedIps` (the speakers) get the file. The path
  * has a random token, and the port is chosen by the OS.
  */
-export async function serveFile(path: string, speakerIp: string, allowedIps: string[]): Promise<FileServer> {
+export async function serveFile(path: string, speakerIp: string, allowedIps: string[], title?: string): Promise<FileServer> {
   const file = Bun.file(path);
   if (!(await file.exists())) throw new SonosError(`File not found: ${path}`);
   const ext = extname(path).toLowerCase();
@@ -63,8 +64,59 @@ export async function serveFile(path: string, speakerIp: string, allowedIps: str
   });
   return {
     url: `http://${host}:${server.port}${filePath}`,
-    title: basename(path, extname(path)),
+    title: title ?? basename(path, extname(path)),
     contentType,
     stop: () => server.stop(true),
   };
+}
+
+export interface WaitOptions {
+  pollMs?: number;
+  /**
+   * How long another source may play before the wait ends. play-file keeps
+   * the server running for some minutes, so that an interrupt (for example
+   * an announcement) can return to the file.
+   */
+  replacedGraceMs?: number;
+}
+
+/**
+ * Waits until the file at `url` stops, or until another source replaces it.
+ * A paused file keeps the wait going, so playback can continue.
+ */
+export async function waitForFileEnd(
+  s: Speaker,
+  url: string,
+  { pollMs = 2000, replacedGraceMs = 0 }: WaitOptions = {},
+): Promise<"ended" | "replaced"> {
+  // Sonos can report STOPPED for a moment while it starts the stream.
+  const startGraceMs = 6000;
+  let started = Date.now();
+  let seenPlaying = false;
+  let replacedSince: number | undefined;
+  let failures = 0;
+  for (;;) {
+    await Bun.sleep(pollMs);
+    try {
+      const [{ uri }, state] = await Promise.all([s.mediaInfo(), s.transportState()]);
+      failures = 0;
+      if (uri !== url) {
+        replacedSince ??= Date.now();
+        if (Date.now() - replacedSince >= replacedGraceMs) return "replaced";
+        continue;
+      }
+      if (replacedSince !== undefined) {
+        // The file is back after an interrupt. The restore sets the source
+        // before it seeks and plays, so a short STOPPED is not the end.
+        replacedSince = undefined;
+        started = Date.now();
+        seenPlaying = false;
+      }
+      if (state === "PLAYING") seenPlaying = true;
+      if (state === "STOPPED" && (seenPlaying || Date.now() - started > startGraceMs)) return "ended";
+    } catch (err) {
+      // Wi-Fi can drop single requests. Give up after about 15 failed polls.
+      if (++failures >= 15) throw err;
+    }
+  }
 }
