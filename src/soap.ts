@@ -1,4 +1,4 @@
-import { escapeXml, parseXml, type XmlNode } from "./xml.ts";
+import { parseXml, type XmlNode } from "./xml.ts";
 
 export const SERVICES = {
   AVTransport: { type: "urn:schemas-upnp-org:service:AVTransport:1", path: "/MediaRenderer/AVTransport" },
@@ -59,17 +59,17 @@ export function isDryRun() {
 const READ_ONLY_ACTION = /^(Get|List|Browse|Search|SnapshotGroupVolume$)/;
 
 export function buildEnvelope(service: ServiceName, action: string, args: SoapArgs): string {
-  const body = Object.entries(args)
-    .map(([name, value]) => {
-      const v = typeof value === "boolean" ? (value ? "1" : "0") : String(value);
-      return `<${name}>${escapeXml(v)}</${name}>`;
-    })
-    .join("");
-  return (
-    '<?xml version="1.0"?>' +
-    '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
-    `<s:Body><u:${action} xmlns:u="${SERVICES[service].type}">${body}</u:${action}></s:Body></s:Envelope>`
-  );
+  const values = Object.fromEntries(Object.entries(args).map(([name, value]) => {
+    if (/^[@#]/.test(name)) throw new SonosError(`Invalid SOAP argument name: ${name}`);
+    return [name, typeof value === "boolean" ? (value ? "1" : "0") : String(value)];
+  }));
+  return '<?xml version="1.0"?>' + Bun.XML.stringify({
+    "s:Envelope": {
+      "@xmlns:s": "http://schemas.xmlsoap.org/soap/envelope/",
+      "@s:encodingStyle": "http://schemas.xmlsoap.org/soap/encoding/",
+      "s:Body": { [`u:${action}`]: { "@xmlns:u": SERVICES[service].type, ...values } },
+    },
+  });
 }
 
 // Speakers reject arguments that are not in SCPD order.

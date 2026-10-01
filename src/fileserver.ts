@@ -16,7 +16,7 @@ export interface FileServer {
   url: string;
   title: string;
   contentType: string;
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 const toInt = (ip: string) => ip.split(".").reduce((n, part) => (n << 8) + Number(part), 0) >>> 0;
@@ -65,15 +65,30 @@ export async function serveFile(path: string, speakerIp: string, allowedIps: str
 }
 
 export interface WaitOptions {
+  signal?: AbortSignal;
   pollMs?: number;
   /** Keeps serving while an interrupt plays, so the restore can return to the file. */
   replacedGraceMs?: number;
 }
 
+// Ctrl-C must not wait for the next poll.
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const wake = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", wake);
+      resolve();
+    };
+    const timer = setTimeout(wake, ms);
+    signal?.addEventListener("abort", wake);
+  });
+}
+
 export async function waitForFileEnd(
   s: Speaker,
   url: string,
-  { pollMs = 2000, replacedGraceMs = 0 }: WaitOptions = {},
+  { pollMs = 2000, replacedGraceMs = 0, signal }: WaitOptions = {},
 ): Promise<"ended" | "replaced"> {
   // Sonos reports STOPPED for a moment while the stream starts.
   const startGraceMs = 6000;
@@ -82,7 +97,8 @@ export async function waitForFileEnd(
   let replacedSince: number | undefined;
   let failures = 0;
   for (;;) {
-    await Bun.sleep(pollMs);
+    await sleep(pollMs, signal);
+    signal?.throwIfAborted();
     try {
       const [{ uri }, state] = await Promise.all([s.mediaInfo(), s.transportState()]);
       failures = 0;

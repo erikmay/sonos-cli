@@ -50,13 +50,16 @@ function normalize(node: unknown): unknown {
   return out;
 }
 
-export function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+export function didlMetadata(item: Bun.XML.Element): string {
+  return Bun.XML.stringify({
+    "DIDL-Lite": {
+      "@xmlns:dc": "http://purl.org/dc/elements/1.1/",
+      "@xmlns:upnp": "urn:schemas-upnp-org:metadata-1-0/upnp/",
+      "@xmlns:r": "urn:schemas-rinconnetworks-com:metadata-1-0/",
+      "@xmlns": "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/",
+      item,
+    },
+  });
 }
 
 export function text(node: unknown): string {

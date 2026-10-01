@@ -9,8 +9,10 @@ export async function speechToFile(text: string, voice?: string): Promise<string
   const args = ["say", "-o", path, "--file-format=WAVE", "--data-format=LEI16@44100"];
   if (voice) args.push("-v", voice);
   const proc = Bun.spawn([...args, "--", text], { stdout: "ignore", stderr: "pipe" });
-  if ((await proc.exited) !== 0) {
-    throw new SonosError(`say failed: ${(await new Response(proc.stderr).text()).trim()}`);
+  const [exitCode, stderr] = await Promise.all([proc.exited, proc.stderr.text()]);
+  if (exitCode !== 0) {
+    await Bun.file(path).delete().catch(() => {});
+    throw new SonosError(`say failed: ${stderr.trim()}`);
   }
   return path;
 }

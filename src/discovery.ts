@@ -1,6 +1,6 @@
 import { networkInterfaces, homedir } from "node:os";
 import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
+import { isIPv4 } from "node:net";
 import { PORT, SonosError, soap } from "./soap.ts";
 import { parseXml, type XmlNode } from "./xml.ts";
 
@@ -112,7 +112,8 @@ const cacheFile = join(cacheDir, "hosts.json");
 
 async function readCache(): Promise<string[]> {
   try {
-    return (await Bun.file(cacheFile).json()) as string[];
+    const hosts: unknown = await Bun.file(cacheFile).json();
+    return Array.isArray(hosts) && hosts.every((ip): ip is string => typeof ip === "string" && isIPv4(ip)) ? hosts : [];
   } catch {
     return [];
   }
@@ -121,7 +122,6 @@ async function readCache(): Promise<string[]> {
 async function writeCache(topology: Topology) {
   const ips = JSON.stringify([...new Set(topology.members.filter((m) => !m.invisible).map((m) => m.ip))]);
   if (JSON.stringify(await readCache()) === ips) return;
-  await mkdir(cacheDir, { recursive: true });
   await Bun.write(cacheFile, ips);
 }
 

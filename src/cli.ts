@@ -1,11 +1,14 @@
 #!/usr/bin/env bun
 import { loadTopology, type Topology } from "./discovery.ts";
 import { SERVICES, SonosError, fetchText, isDryRun, setDryRun, soap, type ServiceName } from "./soap.ts";
-import { unlink } from "node:fs/promises";
-import { serveFile, waitForFileEnd } from "./fileserver.ts";
-import { groupSpeakers, loadSnapshot, restoreSnapshot, saveSnapshot, takeSnapshot, type Snapshot } from "./snapshot.ts";
+import { loadSnapshot, restoreSnapshot, saveSnapshot, takeSnapshot, describeSnapshot, reportRestore } from "./snapshot.ts";
+import { parseArguments, resolveAction, UsageError, type Command } from "./arguments.ts";
+import { playFile, interruptWith } from "./playback.ts";
+import { watch } from "./watch.ts";
+import { FADE_DEFAULTS, MAX_FADE_SECONDS, fade, type FadeOptions } from "./fade.ts";
+import { isRecord } from "./validation.ts";
 import { speechToFile } from "./tts.ts";
-import { PLAY_MODES, Speaker, formatTime, groupName, parseTime, trackMetadata, type PlayMode, type Repeat } from "./speaker.ts";
+import { PLAY_MODES, Speaker, assertPlayable, formatTime, groupName, parseTime, type PlayMode, type Repeat } from "./speaker.ts";
 import { SonosWebSocket, type WsHeader } from "./ws.ts";
 import { parseXml, type DidlObject } from "./xml.ts";
 
@@ -18,21 +21,14 @@ interface Context {
   options: Map<string, string>;
 }
 
-interface Command {
-  names: string[];
-  usage: string;
-  help: string;
-  run: (ctx: Context, args: string[]) => Promise<void>;
-}
-
 function out(ctx: Context, value: unknown, human?: () => string) {
   if (ctx.json) console.log(JSON.stringify(value, null, 2));
   else console.log(human ? human() : String(value));
 }
 
 function table(rows: string[][]): string {
-  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => (r[i] ?? "").length)));
-  return rows.map((r) => r.map((c, i) => c.padEnd(widths[i]!)).join("  ").trimEnd()).join("\n");
+  const widths = rows[0]?.map((_, i) => Math.max(...rows.map((r) => Bun.stringWidth(r[i] ?? "")))) ?? [];
+  return rows.map((r) => r.map((c, i) => c + " ".repeat(widths[i]! - Bun.stringWidth(c))).join("  ").trimEnd()).join("\n");
 }
 
 function describeTrack(t: Awaited<ReturnType<Speaker["currentTrack"]>>): string {
@@ -53,7 +49,7 @@ function bool(value: string): boolean {
 
 function int(value: string | undefined, name = "value"): number {
   const n = Number(value);
-  if (value === undefined || !Number.isInteger(n)) throw new SonosError(`Expected an integer for ${name}, got "${value ?? ""}"`);
+  if (value === undefined || !value.trim() || !Number.isSafeInteger(n)) throw new SonosError(`Expected an integer for ${name}, got "${value ?? ""}"`);
   return n;
 }
 
@@ -106,7 +102,7 @@ function pickFavorite(favorites: DidlObject[], query: string): DidlObject {
   throw new SonosError(`Favorite "${query}" is ambiguous: ${matches.map((f) => f.title).join(", ")}`);
 }
 
-const commands: Command[] = [
+const commands: Command<Context>[] = [
   {
     names: ["speakers", "discover", "ls"],
     usage: "speakers",
@@ -182,16 +178,17 @@ const commands: Command[] = [
   { names: ["prev", "previous"], usage: "prev", help: "Go to the previous track", run: async (ctx) => ctx.speaker().previous() },
   {
     names: ["seek"],
+    args: [1, 1],
     usage: "seek <1:30|90|+30|-15|50%>",
     help: "Seek to a position in the track, forward/back in seconds, or to a percentage",
     run: async (ctx, [target]) => {
-      if (!target) throw new SonosError("Usage: seek <time>");
-      await ctx.speaker().seek(target);
+      await ctx.speaker().seek(target!);
     },
   },
 
   {
     names: ["volume", "vol", "v"],
+    args: [0, 1],
     usage: "volume [0-100|+n|-n]",
     help: "Get or set the speaker volume",
     run: async (ctx, args) => {
@@ -201,6 +198,7 @@ const commands: Command[] = [
   },
   {
     names: ["group-volume", "gv"],
+    args: [0, 1],
     usage: "group-volume [0-100|+n|-n]",
     help: "Get or set the volume of the whole group",
     run: async (ctx, args) => {
@@ -210,6 +208,7 @@ const commands: Command[] = [
   },
   {
     names: ["ramp"],
+    args: [1, 1],
     usage: "ramp <0-100>",
     help: "Change the volume slowly to a target value",
     run: async (ctx, [target]) => {
@@ -219,6 +218,7 @@ const commands: Command[] = [
   },
   {
     names: ["mute"],
+    args: [0, 1],
     usage: "mute [on|off]",
     help: "Get or set mute of the speaker",
     run: async (ctx, args) => {
@@ -228,6 +228,7 @@ const commands: Command[] = [
   },
   {
     names: ["group-mute", "gm"],
+    args: [0, 1],
     usage: "group-mute [on|off]",
     help: "Get or set mute of the whole group",
     run: async (ctx, args) => {
@@ -237,6 +238,7 @@ const commands: Command[] = [
   },
   {
     names: ["bass"],
+    args: [0, 1],
     usage: "bass [-10..10]",
     help: "Get or set bass",
     run: async (ctx, args) => {
@@ -246,6 +248,7 @@ const commands: Command[] = [
   },
   {
     names: ["treble"],
+    args: [0, 1],
     usage: "treble [-10..10]",
     help: "Get or set treble",
     run: async (ctx, args) => {
@@ -255,6 +258,7 @@ const commands: Command[] = [
   },
   {
     names: ["loudness"],
+    args: [0, 1],
     usage: "loudness [on|off]",
     help: "Get or set loudness compensation",
     run: async (ctx, args) => {
@@ -264,6 +268,7 @@ const commands: Command[] = [
   },
   {
     names: ["night"],
+    args: [0, 1],
     usage: "night [on|off]",
     help: "Get or set night mode (soundbars only)",
     run: async (ctx, args) => {
@@ -273,6 +278,7 @@ const commands: Command[] = [
   },
   {
     names: ["dialog"],
+    args: [0, 1],
     usage: "dialog [on|off]",
     help: "Get or set speech enhancement (soundbars only)",
     run: async (ctx, args) => {
@@ -283,18 +289,20 @@ const commands: Command[] = [
 
   {
     names: ["mode"],
+    args: [0, 1],
     usage: `mode [${Object.keys(PLAY_MODES).join("|")}]`,
     help: "Get or set the play mode",
     run: async (ctx, [mode]) => {
       const s = ctx.speaker();
       if (!mode) return out(ctx, await s.playMode());
       const upper = mode.toUpperCase() as PlayMode;
-      if (!(upper in PLAY_MODES)) throw new SonosError(`Play mode must be one of ${Object.keys(PLAY_MODES).join(", ")}`);
+      if (!Object.hasOwn(PLAY_MODES, upper)) throw new SonosError(`Play mode must be one of ${Object.keys(PLAY_MODES).join(", ")}`);
       await s.setPlayMode(upper);
     },
   },
   {
     names: ["shuffle"],
+    args: [0, 1],
     usage: "shuffle [on|off]",
     help: "Get or set shuffle",
     run: async (ctx, [value]) => {
@@ -308,6 +316,7 @@ const commands: Command[] = [
   },
   {
     names: ["repeat"],
+    args: [0, 1],
     usage: "repeat [off|all|one]",
     help: "Get or set repeat",
     run: async (ctx, [value]) => {
@@ -319,6 +328,7 @@ const commands: Command[] = [
   },
   {
     names: ["crossfade"],
+    args: [0, 1],
     usage: "crossfade [on|off]",
     help: "Get or set crossfade",
     run: async (ctx, args) => {
@@ -328,6 +338,7 @@ const commands: Command[] = [
   },
   {
     names: ["sleep"],
+    args: [0, 1],
     usage: "sleep [30m|1h30m|90s|1:30:00|<minutes>|off]",
     help: "Get, set or cancel the sleep timer",
     run: async (ctx, [value]) => {
@@ -344,35 +355,31 @@ const commands: Command[] = [
     names: ["queue", "q"],
     usage: "queue [list|clear|play <n>|remove <n>|add <uri>]",
     help: "Show or change the queue",
-    run: async (ctx, [sub = "list", arg]) => {
-      const s = ctx.speaker();
-      switch (sub) {
-        case "list": {
+    subcommands: {
+      list: {
+        run: async (ctx) => {
+          const s = ctx.speaker();
           const [items, track] = await Promise.all([s.queue(), s.currentTrack()]);
           const current = track.source === "QUEUE" ? track.queuePosition : 0;
-          return out(ctx, items, () =>
+          out(ctx, items, () =>
             items.length === 0
               ? "(queue is empty)"
               : items
                   .map((t, i) => `${i + 1 === current ? "*" : " "}${String(i + 1).padStart(4)}  ${[t.creator, t.title].filter(Boolean).join(" - ")}`)
                   .join("\n"),
           );
-        }
-        case "clear":
-          return s.clearQueue();
-        case "play":
-          return s.playFromQueue(int(arg, "queue position"));
-        case "remove":
-          return s.removeFromQueue(int(arg, "queue position"));
-        case "add": {
-          if (!arg) throw new SonosError("Usage: queue add <uri>");
-          const position = await s.addToQueue(arg);
+        },
+      },
+      clear: { run: async (ctx) => ctx.speaker().clearQueue() },
+      play: { args: [1, 1], run: async (ctx, [n]) => ctx.speaker().playFromQueue(int(n, "queue position")) },
+      remove: { args: [1, 1], run: async (ctx, [n]) => ctx.speaker().removeFromQueue(int(n, "queue position")) },
+      add: {
+        args: [1, 1],
+        run: async (ctx, [uri]) => {
+          const position = await ctx.speaker().addToQueue(uri!);
           if (!isDryRun()) out(ctx, position, () => `Added at position ${position}`);
-          return;
-        }
-        default:
-          throw new SonosError(`Unknown queue command: ${sub}`);
-      }
+        },
+      },
     },
   },
 
@@ -389,11 +396,11 @@ const commands: Command[] = [
   },
   {
     names: ["fav", "play-fav", "pf"],
+    args: [1, Infinity],
     usage: "fav <name|number>",
     help: "Play a Sonos favorite (name match is case-insensitive and partial)",
     run: async (ctx, args) => {
       const query = args.join(" ");
-      if (!query) throw new SonosError("Usage: fav <name|number>");
       const s = ctx.speaker();
       const fav = pickFavorite(await s.favorites(), query);
       await s.playFavorite(fav);
@@ -411,62 +418,79 @@ const commands: Command[] = [
   },
   {
     names: ["play-uri", "uri"],
+    args: [1, Infinity],
+    options: { radio: { type: "boolean" } },
     usage: "play-uri <uri> [title] [--radio]",
     help: "Play a URI (for example an HTTP stream). A title makes it a radio station",
     run: async (ctx, [uri, ...title]) => {
-      if (!uri) throw new SonosError("Usage: play-uri <uri> [title]");
-      await ctx.speaker().playUri(uri, { title: title.join(" ") || undefined, radio: ctx.flags.has("radio") });
+      await ctx.speaker().playUri(uri!, { title: title.join(" ") || undefined, radio: ctx.flags.has("radio") });
+    },
+  },
+  {
+    names: ["fade"],
+    options: { out: { type: "string" }, in: { type: "string" }, volume: { type: "string" } },
+    usage: "fade [next|prev|fav <name>|uri <uri>|file <path>]",
+    help: "Fade out, switch the song, fade back in. 'file' serves the file until it ends (like play-file)",
+    subcommands: {
+      next: { run: async (ctx) => fadeTo(ctx, async (s) => { await s.next(); await s.play(); }) },
+      prev: { run: async (ctx) => fadeTo(ctx, async (s) => { await s.previous(); await s.play(); }) },
+      fav: {
+        args: [1, Infinity],
+        run: async (ctx, args) => {
+          const fav = pickFavorite(await ctx.speaker().favorites(), args.join(" "));
+          assertPlayable(fav);
+          await fadeTo(ctx, (s) => s.playFavorite(fav));
+        },
+      },
+      uri: {
+        args: [1, Infinity],
+        run: async (ctx, [uri, ...title]) => fadeTo(ctx, (s) => s.playUri(uri!, { title: title.join(" ") || undefined })),
+      },
+      file: {
+        args: [1, Infinity],
+        run: async (ctx, args) => {
+          const s = ctx.speaker();
+          const options = fadeOptions(ctx);
+          await playFile(s, args.join(" "), (play) => fade(s, play, options));
+        },
+      },
     },
   },
   {
     names: ["play-file", "file"],
+    args: [1, Infinity],
     usage: "play-file <path>",
     help: "Play a local audio file. Serves it over HTTP until playback ends (Ctrl-C stops)",
     run: async (ctx, args) => {
       const path = args.join(" ");
-      if (!path) throw new SonosError("Usage: play-file <path>");
-      const s = ctx.speaker();
-      const server = await serveFile(path, s.coordinator.ip, ctx.topology.members.map((m) => m.ip));
-      if (isDryRun()) {
-        await s.playUri(server.url, { metadata: trackMetadata(server.title, server.url, server.contentType) });
-        server.stop();
-        return;
-      }
-      process.on("SIGINT", async () => {
-        // Without the server, our file cannot continue. Other music can.
-        if ((await s.mediaInfo().catch(() => ({ uri: "" }))).uri === server.url) await s.stop().catch(() => {});
-        server.stop();
-        process.exit(130);
-      });
-      await s.playUri(server.url, { metadata: trackMetadata(server.title, server.url, server.contentType) });
-      console.error(`Playing "${server.title}" on ${groupName(s.group)}. Press Ctrl-C to stop.`);
-      const result = await waitForFileEnd(s, server.url, { replacedGraceMs: 10 * 60_000 });
-      console.error(result === "ended" ? "Playback ended." : "Another source replaced the file.");
-      server.stop();
+      await playFile(ctx.speaker(), path);
     },
   },
   {
     names: ["interrupt", "insert"],
+    args: [1, Infinity],
+    options: { volume: { type: "string" } },
     usage: "interrupt <path> [--volume n]",
     help: "Play a local file, then return to the previous music at the same position",
     run: async (ctx, args) => {
       const path = args.join(" ");
-      if (!path) throw new SonosError("Usage: interrupt <path>");
-      await interruptWith(ctx, path);
+      await interruptWith(ctx.speaker(), path, { volume: volumeOption(ctx) });
     },
   },
   {
     names: ["say", "tts"],
+    args: [1, Infinity],
+    options: { volume: { type: "string" }, voice: { type: "string" } },
     usage: 'say "<text>" [--voice Anna] [--volume n]',
     help: "Speak a text (macOS say), then return to the previous music at the same position",
     run: async (ctx, args) => {
       const text = args.join(" ");
-      if (!text) throw new SonosError('Usage: say "<text>"');
+      const volume = volumeOption(ctx);
       const path = await speechToFile(text, ctx.options.get("voice"));
       try {
-        await interruptWith(ctx, path, "Announcement");
+        await interruptWith(ctx.speaker(), path, { volume, title: "Announcement" });
       } finally {
-        await unlink(path).catch(() => {});
+        await Bun.file(path).delete().catch(() => {});
       }
     },
   },
@@ -474,31 +498,35 @@ const commands: Command[] = [
     names: ["snapshot", "snap"],
     usage: "snapshot [save|restore|show] [name]",
     help: "Save what the group plays (source, track, position, volumes), or restore it",
-    run: async (ctx, [sub = "save", name = "default"]) => {
-      const s = ctx.speaker();
-      switch (sub) {
-        case "save": {
-          const snap = await takeSnapshot(s);
+    subcommands: {
+      save: {
+        args: [0, 1],
+        run: async (ctx, [name = "default"]) => {
+          const snap = await takeSnapshot(ctx.speaker());
           await saveSnapshot(name, snap);
-          return out(ctx, snap, () => `Saved "${name}": ${describeSnapshot(snap)}`);
-        }
-        case "show": {
+          out(ctx, snap, () => `Saved "${name}": ${describeSnapshot(snap)}`);
+        },
+      },
+      restore: {
+        args: [0, 1],
+        run: async (ctx, [name = "default"]) => {
           const snap = await loadSnapshot(name);
-          return out(ctx, snap, () => describeSnapshot(snap));
-        }
-        case "restore": {
+          const summary = reportRestore(snap, await restoreSnapshot(ctx.speaker(), snap), "Restored");
+          if (!isDryRun()) out(ctx, snap.title, () => summary);
+        },
+      },
+      show: {
+        args: [0, 1],
+        run: async (ctx, [name = "default"]) => {
           const snap = await loadSnapshot(name);
-          for (const w of await restoreSnapshot(s, snap)) console.error(`Warning: ${w}`);
-          if (!isDryRun()) out(ctx, snap.title, () => `Restored: ${describeSnapshot(snap)}`);
-          return;
-        }
-        default:
-          throw new SonosError(`Unknown snapshot command: ${sub}`);
-      }
+          out(ctx, snap, () => describeSnapshot(snap));
+        },
+      },
     },
   },
   {
     names: ["line-in"],
+    args: [0, 1],
     usage: "line-in [source room]",
     help: "Play the line-in input of this speaker or of another speaker",
     run: async (ctx, [source]) => {
@@ -510,10 +538,10 @@ const commands: Command[] = [
 
   {
     names: ["join", "group"],
+    args: [1, Infinity],
     usage: "join <room>",
     help: "Add the speaker to the group of another room",
     run: async (ctx, args) => {
-      if (!args[0]) throw new SonosError("Usage: join <room>");
       await ctx.speaker().join(ctx.find(args.join(" ")));
     },
   },
@@ -551,6 +579,7 @@ const commands: Command[] = [
 
   {
     names: ["light"],
+    args: [0, 1],
     usage: "light [on|off]",
     help: "Get or set the status light",
     run: async (ctx, args) => {
@@ -560,6 +589,7 @@ const commands: Command[] = [
   },
   {
     names: ["buttons"],
+    args: [0, 1],
     usage: "buttons [on|off]",
     help: "Get or set if the buttons on the speaker work",
     run: async (ctx, args) => {
@@ -586,6 +616,7 @@ const commands: Command[] = [
 
   {
     names: ["actions", "describe"],
+    args: [0, 1],
     usage: "actions [Service]",
     help: "List the UPnP services, or the actions of one service (from its SCPD)",
     run: async (ctx, [service]) => {
@@ -612,10 +643,10 @@ const commands: Command[] = [
   },
   {
     names: ["raw", "call"],
+    args: [2, Infinity],
     usage: "raw <Service> <Action> [Arg=Value ...]",
     help: "Send any UPnP action to the speaker (see 'actions')",
     run: async (ctx, [service, action, ...rest]) => {
-      if (!service || !action) throw new SonosError("Usage: raw <Service> <Action> [Arg=Value ...]");
       const args = Object.fromEntries(
         rest.map((kv) => {
           const i = kv.indexOf("=");
@@ -623,31 +654,40 @@ const commands: Command[] = [
           return [kv.slice(0, i), kv.slice(i + 1)];
         }),
       );
-      const result = await soap(ctx.speaker().ip, resolveService(service), action, args);
+      const result = await soap(ctx.speaker().ip, resolveService(service!), action!, args);
       out(ctx, result, () => Object.entries(result).map(([k, v]) => `${k}: ${v}`).join("\n") || "OK");
     },
   },
   {
     names: ["ws"],
+    args: [2, 3],
+    options: { player: { type: "boolean" }, household: { type: "boolean" } },
     usage: "ws <namespace> <command> [json-body] [--player|--household]",
     help: "Send a command to the local Sonos Control API (WebSocket, port 1443)",
     run: async (ctx, [namespace, command, body]) => {
-      if (!namespace || !command) throw new SonosError("Usage: ws <namespace> <command> [json-body]");
+      if (ctx.flags.has("player") && ctx.flags.has("household")) throw new UsageError("Options --player and --household cannot be combined");
+      let requestBody: unknown;
+      try {
+        requestBody = body ? JSON.parse(body) : {};
+      } catch {
+        throw new UsageError("WebSocket body must be valid JSON");
+      }
+      if (!isRecord(requestBody)) throw new UsageError("WebSocket body must be a JSON object");
       const s = ctx.speaker();
-      const ns = namespace.includes(":") ? namespace : `${namespace}:1`;
+      const ns = namespace!.includes(":") ? namespace! : `${namespace}:1`;
       // A player command sent to another speaker fails with ERROR_INVALID_OBJECT_ID.
       const ip = ctx.flags.has("player") ? s.ip : s.coordinator.ip;
-      if (isDryRun() && !/^(get|subscribe|unsubscribe)/.test(command)) {
+      if (isDryRun() && !/^(get|subscribe|unsubscribe)/.test(command!)) {
         console.error(`[dry-run] ${ip} ${ns}.${command} ${body ?? "{}"}`);
         return;
       }
       const ws = await SonosWebSocket.connect(ip);
       try {
-        const header: WsHeader = { namespace: ns, command };
+        const header: WsHeader = { namespace: ns, command: command! };
         if (ctx.flags.has("player")) header.playerId = s.uuid;
         else if (ctx.flags.has("household")) header.householdId = await ws.householdId();
         else header.groupId = s.group.id;
-        const [, response] = await ws.request(header, body ? JSON.parse(body) : {});
+        const [, response] = await ws.request(header, requestBody);
         console.log(JSON.stringify(response, null, 2));
       } finally {
         ws.close();
@@ -658,84 +698,35 @@ const commands: Command[] = [
     names: ["watch"],
     usage: "watch",
     help: "Print playback, track and volume changes of the group (Ctrl-C to stop)",
-    run: async (ctx) => {
-      const s = ctx.speaker();
-      const ws = await SonosWebSocket.connect(s.coordinator.ip);
-      const stamp = () => new Date().toLocaleTimeString();
-      ws.onEvent(([header, body]) => {
-        if (ctx.json) return console.log(JSON.stringify({ event: header.type, ...body }));
-        switch (header.type) {
-          case "metadataStatus": {
-            const track = body.currentItem?.track;
-            const artist = track?.artist?.name ?? "";
-            const title = track?.name ?? body.streamInfo ?? "";
-            console.log(`${stamp()}  track   ${[artist, title].filter(Boolean).join(" - ")}${body.container?.name ? `  (${body.container.name})` : ""}`);
-            break;
-          }
-          case "playbackStatus":
-            console.log(`${stamp()}  state   ${String(body.playbackState).replace("PLAYBACK_STATE_", "")}`);
-            break;
-          case "groupVolume":
-            console.log(`${stamp()}  volume  ${body.volume}${body.muted ? " (muted)" : ""}`);
-            break;
-          case "groupCoordinatorChanged":
-            console.log(`${stamp()}  group changed (${body.groupStatus}). Restart watch.`);
-            ws.close();
-            process.exit(0);
-          default:
-            console.log(`${stamp()}  ${header.type}`);
-        }
-      });
-      console.log(`Watching ${groupName(s.group)} ...`);
-      for (const namespace of ["playbackMetadata:1", "playback:1", "groupVolume:1"]) {
-        await ws.request({ namespace, command: "subscribe", groupId: s.group.id });
-      }
-      await new Promise(() => {});
-    },
+    run: async (ctx) => watch(ctx.speaker(), ctx.json),
   },
 ];
 
-function describeSnapshot(snap: Snapshot): string {
-  const at = snap.position ? ` at ${snap.position}` : "";
-  const volumes = snap.members.map((m) => `${m.name} ${m.volume}${m.muted ? " (muted)" : ""}`).join(", ");
-  return `${snap.title || snap.mediaUri}${at}, ${snap.state}, ${volumes}`;
+function fadeSeconds(ctx: Context, name: "out" | "in"): number {
+  const value = ctx.options.get(name);
+  if (value === undefined) return FADE_DEFAULTS[name];
+  const n = Number(value);
+  if (!value.trim() || !Number.isFinite(n) || n < 0 || n > MAX_FADE_SECONDS) {
+    throw new UsageError(`--${name} must be 0 to ${MAX_FADE_SECONDS} seconds, got "${value}"`);
+  }
+  return n;
 }
 
-// The "last-interrupt" snapshot lets a user repair a crashed run.
-async function interruptWith(ctx: Context, path: string, title?: string) {
+function fadeOptions(ctx: Context): FadeOptions {
+  return { out: fadeSeconds(ctx, "out"), in: fadeSeconds(ctx, "in"), volume: volumeOption(ctx) };
+}
+
+async function fadeTo(ctx: Context, change: (s: Speaker) => Promise<unknown>) {
   const s = ctx.speaker();
-  const volume = ctx.options.has("volume") ? int(ctx.options.get("volume"), "--volume") : undefined;
-  const snap = await takeSnapshot(s);
-  if (!isDryRun()) await saveSnapshot("last-interrupt", snap);
-  const server = await serveFile(path, s.coordinator.ip, ctx.topology.members.map((m) => m.ip), title);
+  const options = fadeOptions(ctx);
+  await fade(s, () => change(s), options);
+  if (isDryRun()) return;
+  const track = await s.currentTrack();
+  out(ctx, { ...options, track }, () => `${describeTrack(track)}  (faded out ${options.out}s, in ${options.in}s)`);
+}
 
-  let done = false;
-  const restore = async () => {
-    if (done) return;
-    done = true;
-    for (const w of await restoreSnapshot(s, snap)) console.error(`Warning: ${w}`);
-  };
-  process.on("SIGINT", async () => {
-    await restore().catch((e) => console.error(`Error: ${e.message}`));
-    server.stop();
-    process.exit(130);
-  });
-
-  try {
-    if (volume !== undefined) for (const m of groupSpeakers(s)) await m.setVolume(volume);
-    await s.playUri(server.url, { metadata: trackMetadata(server.title, server.url, server.contentType) });
-    if (!isDryRun()) {
-      console.error(`Playing "${server.title}" on ${groupName(s.group)} ...`);
-      if ((await waitForFileEnd(s, server.url, { pollMs: 500 })) === "replaced") {
-        done = true;
-        console.error("Another source started. The previous music is not restored.");
-      }
-    }
-  } finally {
-    await restore();
-    server.stop();
-  }
-  if (!isDryRun() && snap.mediaUri) console.error(`Back to: ${describeSnapshot(snap)}`);
+function volumeOption(ctx: Context): number | undefined {
+  return ctx.options.has("volume") ? int(ctx.options.get("volume"), "--volume") : undefined;
 }
 
 function resolveService(name: string): ServiceName {
@@ -778,27 +769,6 @@ function defaultSpeaker(topology: Topology, find: (q: string) => Speaker): Speak
   );
 }
 
-class UsageError extends SonosError {}
-
-// A stray word (for example "--dry-run" after "--") must fail, never change a value.
-// Unlisted commands join their arguments.
-const MAX_ARGS: Record<string, number> = {
-  ...Object.fromEntries(
-    ["speakers", "status", "info", "track", "state", "play", "pause", "stop", "toggle", "next", "prev", "favorites",
-     "playlists", "tv", "leave", "party", "ungroup-all", "alarms", "watch"].map((n) => [n, 0]),
-  ),
-  ...Object.fromEntries(
-    ["seek", "volume", "group-volume", "ramp", "mute", "group-mute", "bass", "treble", "loudness", "night", "dialog",
-     "mode", "shuffle", "repeat", "crossfade", "sleep", "light", "buttons", "line-in", "actions"].map((n) => [n, 1]),
-  ),
-  queue: 2,
-  snapshot: 2,
-  ws: 3,
-};
-
-const BOOLEAN_FLAGS = new Set(["help", "json", "dry-run", "refresh", "radio", "player", "household"]);
-const VALUE_OPTIONS = new Set(["speaker", "volume", "voice"]);
-
 function usage(): string {
   const lines = commands.map((c) => `  ${c.usage.padEnd(48)} ${c.help}`);
   return `sonos-cli - control Sonos speakers in the local network
@@ -815,8 +785,10 @@ Options:
   --refresh              Ignore the discovery cache
   --radio                play-uri: force radio mode (x-rincon-mp3radio)
   --volume <n>           interrupt, say: volume of all group members during the insert
+                         fade: volume of all group members after the fade
   --voice <name>         say: macOS voice (list: say -v '?'), for example Anna
   --player, --household  ws: target the player or the household (default: group)
+  --out <s>, --in <s>    fade: fade-out and fade-in time in seconds (default ${FADE_DEFAULTS.out} and ${FADE_DEFAULTS.in}, max ${MAX_FADE_SECONDS})
   -h, --help             Show this help
 
 Environment:
@@ -828,31 +800,7 @@ Transport and queue commands always go to the group coordinator.`;
 }
 
 async function main(argv: string[]) {
-  const positional: string[] = [];
-  const flags = new Set<string>();
-  const options = new Map<string, string>();
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i]!;
-    if (arg === "--") {
-      positional.push(...argv.slice(i + 1));
-      break;
-    }
-    const long = /^--([a-z-]+)(?:=(.*))?$/.exec(arg);
-    const name = long ? long[1]! : arg === "-s" ? "speaker" : arg === "-h" ? "help" : undefined;
-    if (name === undefined) {
-      // "volume -3" is an argument.
-      if (/^-[a-zA-Z]/.test(arg)) throw new UsageError(`Unknown option "${arg}"`);
-      positional.push(arg);
-    } else if (VALUE_OPTIONS.has(name)) {
-      const value = long?.[2] ?? argv[++i];
-      if (value === undefined || value === "") throw new UsageError(`Option --${name} needs a value`);
-      options.set(name, value);
-    } else if (BOOLEAN_FLAGS.has(name) && long?.[2] === undefined) {
-      flags.add(name);
-    } else {
-      throw new UsageError(`Unknown option "${arg}". Run "sonos --help".`);
-    }
-  }
+  const { positional, flags, options } = parseArguments(argv, commands);
   let speakerQuery = options.get("speaker");
   if (flags.has("help") || positional.length === 0) {
     console.log(usage());
@@ -868,10 +816,7 @@ async function main(argv: string[]) {
   }
   const command = commandByName.get(name!);
   if (!command) throw new UsageError(`Unknown command "${name}". Run "sonos --help".`);
-  const maxArgs = MAX_ARGS[command.names[0]!];
-  if (maxArgs !== undefined && args.length > maxArgs) {
-    throw new UsageError(`Too many arguments for "${name}": ${args.slice(maxArgs).join(" ")}. Usage: sonos ${command.usage}`);
-  }
+  const [action, actionArgs] = resolveAction(command, args, [...flags, ...options.keys()]);
 
   const refresh = flags.has("refresh") || command.names[0] === "speakers";
   const topology = await loadTopology(refresh);
@@ -885,10 +830,10 @@ async function main(argv: string[]) {
     options,
     speaker: () => (cached ??= speakerQuery ? find(speakerQuery) : defaultSpeaker(topology, find)),
   };
-  await command.run(ctx, args);
+  await action.run(ctx, actionArgs);
 }
 
 main(Bun.argv.slice(2)).catch((err) => {
   console.error(err instanceof SonosError ? `Error: ${err.message}` : err);
-  process.exit(err instanceof UsageError ? 2 : 1);
+  process.exitCode = process.exitCode === 130 ? 130 : err instanceof UsageError ? 2 : 1;
 });

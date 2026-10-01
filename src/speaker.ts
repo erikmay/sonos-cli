@@ -1,7 +1,7 @@
 import type { Group, Member, Topology } from "./discovery.ts";
 import { SonosError, fetchText, isDryRun, soap, type SoapArgs, type SoapResult } from "./soap.ts";
-import { wsRequest } from "./ws.ts";
-import { escapeXml, parseDidl, parseXml, text, type DidlObject } from "./xml.ts";
+import { wsRequest, WsConnectionError, WsRejectedError } from "./ws.ts";
+import { didlMetadata, parseDidl, parseXml, text, type DidlObject } from "./xml.ts";
 
 // [shuffle, repeat], as SoCo PLAY_MODES.
 export const PLAY_MODES = {
@@ -282,13 +282,15 @@ export class Speaker {
   }
 
   async playMode(): Promise<PlayMode> {
-    return (await this.av("GetTransportSettings")).PlayMode as PlayMode;
+    const mode = (await this.av("GetTransportSettings")).PlayMode;
+    if (!mode || !Object.hasOwn(PLAY_MODES, mode)) throw new SonosError(`Unsupported play mode: ${mode ?? "(missing)"}`);
+    return mode as PlayMode;
   }
   async setPlayMode(mode: PlayMode) {
     await this.av("SetPlayMode", { NewPlayMode: mode });
   }
   async setShuffleRepeat(change: { shuffle?: boolean; repeat?: Repeat }) {
-    const [shuffle, repeat] = PLAY_MODES[await this.playMode()] ?? PLAY_MODES.NORMAL;
+    const [shuffle, repeat] = PLAY_MODES[await this.playMode()];
     const wanted: readonly [boolean, Repeat] = [change.shuffle ?? shuffle, change.repeat ?? repeat];
     const mode = (Object.keys(PLAY_MODES) as PlayMode[]).find(
       (m) => PLAY_MODES[m][0] === wanted[0] && PLAY_MODES[m][1] === wanted[1],
@@ -369,8 +371,9 @@ export class Speaker {
     return this.browseAll("SQ:");
   }
 
-  // loadFavorite handles every favorite type. UPnP is the fallback for firmware without the local API.
+  // UPnP retries only when loadFavorite certainly did not apply.
   async playFavorite(favorite: DidlObject) {
+    assertPlayable(favorite);
     const favoriteId = favorite.id.replace(/^FV:2\//, "");
     if (isDryRun()) {
       console.error(`[dry-run] ${this.coordinator.ip} favorites:1.loadFavorite ${favoriteId} (${favorite.title})`);
@@ -384,12 +387,9 @@ export class Speaker {
       );
       return;
     } catch (err) {
-      // Shortcuts (Sonos Radio) have no URI and are missing from the local API.
-      if (!favorite.uri) {
-        throw new SonosError(`"${favorite.title}" is a Sonos app shortcut without a URI and cannot play locally (${(err as Error).message})`);
-      }
+      if (!(err instanceof WsConnectionError || err instanceof WsRejectedError)) throw err;
     }
-    const isContainer = favorite.uri.startsWith("x-rincon-cpcontainer:") || /<upnp:class>object\.container/.test(favorite.resMD);
+    const isContainer = favorite.uri.startsWith("x-rincon-cpcontainer:") || parseDidl(favorite.resMD)[0]?.upnpClass.startsWith("object.container");
     if (isContainer) {
       const position = await this.addToQueue(favorite.uri, favorite.resMD, 0, true);
       await this.playFromQueue(position);
@@ -485,25 +485,27 @@ export function groupName(group: Group): string {
   return [group.coordinator.name, ...others].join(" + ");
 }
 
+export function assertPlayable(favorite: DidlObject) {
+  if (!favorite.uri) throw new SonosError(`"${favorite.title}" is a Sonos app shortcut without a URI and cannot play locally`);
+}
+
 // From SoCo play_uri(). The TuneIn service descriptor makes Sonos show radio controls.
 function radioMetadata(title: string): string {
-  return (
-    '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
-    'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
-    `<item id="R:0/0/0" parentID="R:0/0" restricted="true"><dc:title>${escapeXml(title)}</dc:title>` +
-    "<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>" +
-    '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">SA_RINCON65031_</desc></item></DIDL-Lite>'
-  );
+  return didlMetadata({
+    "@id": "R:0/0/0", "@parentID": "R:0/0", "@restricted": "true",
+    "dc:title": title,
+    "upnp:class": "object.item.audioItem.audioBroadcast",
+    desc: { "@id": "cdudn", "@nameSpace": "urn:schemas-rinconnetworks-com:metadata-1-0/", "#text": "SA_RINCON65031_" },
+  });
 }
 
 export function trackMetadata(title: string, uri: string, contentType: string): string {
-  return (
-    '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" ' +
-    'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">' +
-    `<item id="-1" parentID="-1" restricted="true"><dc:title>${escapeXml(title)}</dc:title>` +
-    "<upnp:class>object.item.audioItem.musicTrack</upnp:class>" +
-    `<res protocolInfo="http-get:*:${contentType}:*">${escapeXml(uri)}</res></item></DIDL-Lite>`
-  );
+  return didlMetadata({
+    "@id": "-1", "@parentID": "-1", "@restricted": "true",
+    "dc:title": title,
+    "upnp:class": "object.item.audioItem.musicTrack",
+    res: { "@protocolInfo": `http-get:*:${contentType}:*`, "#text": uri },
+  });
 }
 
 function fileNameOf(uri: string): string {

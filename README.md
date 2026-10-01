@@ -38,6 +38,9 @@ sonos kantine volume 20           # the first word can be a room name
 sonos -s couch volume +5          # or use -s; names can be partial
 sonos gv -3                       # group volume
 sonos pause | play | toggle | next | prev
+sonos fade                        # fade out, next song, fade in (6s out, 4s in)
+sonos fade fav "seeed radio" --out 10 --in 6   # also: fade prev, fade uri <uri>
+sonos fade file ~/Music/track.mp3 --volume 15  # serves the file until it ends
 sonos favorites                   # list Sonos favorites
 sonos fav "seeed radio"           # play a favorite (by name or number)
 sonos play-uri https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3 "Deutschlandfunk"
@@ -60,6 +63,8 @@ Options: `--json` for JSON output, `--dry-run` to print changing requests
 without sending them, `--refresh` to ignore the discovery cache.
 Unknown options and extra arguments are errors (exit code 2), so a typo
 such as `--dryrun` never sends a change.
+Command options are accepted only by their commands. `--player` and
+`--household` cannot be combined.
 
 Environment: `SONOS_SPEAKER` sets the default room, `SONOS_HOST` sets the IP
 of one speaker (for networks without multicast).
@@ -89,6 +94,12 @@ sonos ws favorites getFavorites --household
 | `src/snapshot.ts` | save and restore source, track, position and volumes (like SoCo `snapshot.py`) |
 | `src/tts.ts` | text to speech with the macOS `say` command |
 | `src/xml.ts` | XML parsing (Bun.XML, normalized) and DIDL-Lite |
+| `src/arguments.ts` | strict argument parsing and command contracts |
+| `src/playback.ts` | local file playback and interruption |
+| `src/fade.ts` | volume fade around a change of song (defaults in `FADE_DEFAULTS`) |
+| `src/interrupt.ts` | Ctrl-C handling: first press cleans up, second press quits |
+| `src/watch.ts` | live event display and subscription lifecycle |
+| `src/validation.ts` | shared object boundary check |
 | `src/cli.ts` | command-line interface |
 
 ## Not ported
