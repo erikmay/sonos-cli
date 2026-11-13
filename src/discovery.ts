@@ -107,7 +107,7 @@ function toMember(node: XmlNode): Member {
 }
 
 // One cached IP replaces the 1.5 s SSDP search.
-const cacheDir = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "sonos-cli");
+export const cacheDir = join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "sonos-cli");
 const cacheFile = join(cacheDir, "hosts.json");
 
 async function readCache(): Promise<string[]> {

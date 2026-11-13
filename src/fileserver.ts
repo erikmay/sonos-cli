@@ -42,26 +42,29 @@ export async function serveFile(path: string, speakerIp: string, allowedIps: str
   const contentType = CONTENT_TYPES[ext];
   if (!contentType) throw new SonosError(`Unsupported file type "${ext}". Supported: ${Object.keys(CONTENT_TYPES).join(", ")}`);
 
+  const { url, stop } = serveTo(speakerIp, allowedIps, basename(path), () => new Response(file, { headers: { "Content-Type": contentType } }));
+  return { url, title: title ?? basename(path, extname(path)), contentType, stop };
+}
+
+/** Serves one random path to the speakers only. */
+export function serveTo(speakerIp: string, allowedIps: string[], name: string, respond: () => Response) {
   const allowed = new Set(allowedIps);
-  const filePath = `/${crypto.randomUUID()}/${encodeURIComponent(basename(path))}`;
+  const filePath = `/${crypto.randomUUID()}/${encodeURIComponent(name)}`;
   const host = localAddressFor(speakerIp);
   const server = Bun.serve({
     hostname: host,
     port: 0,
+    // Sonos keeps the stream open and can read nothing for longer than Bun's 10 s default.
+    idleTimeout: 0,
     fetch(req, srv) {
       const client = srv.requestIP(req)?.address?.replace(/^::ffff:/, "") ?? "";
       if (!allowed.has(client)) return new Response("Forbidden", { status: 403 });
       if (new URL(req.url).pathname !== filePath) return new Response("Not found", { status: 404 });
       // Bun answers the Range requests that Sonos sends to seek.
-      return new Response(file, { headers: { "Content-Type": contentType } });
+      return respond();
     },
   });
-  return {
-    url: `http://${host}:${server.port}${filePath}`,
-    title: title ?? basename(path, extname(path)),
-    contentType,
-    stop: () => server.stop(true),
-  };
+  return { url: `http://${host}:${server.port}${filePath}`, stop: () => server.stop(true) };
 }
 
 export interface WaitOptions {

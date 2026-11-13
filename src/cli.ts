@@ -3,7 +3,8 @@ import { loadTopology, type Topology } from "./discovery.ts";
 import { SERVICES, SonosError, fetchText, isDryRun, setDryRun, soap, type ServiceName } from "./soap.ts";
 import { loadSnapshot, restoreSnapshot, saveSnapshot, takeSnapshot, describeSnapshot, reportRestore } from "./snapshot.ts";
 import { parseArguments, resolveAction, UsageError, type Command } from "./arguments.ts";
-import { playFile, interruptWith } from "./playback.ts";
+import { playFile, playMacAudio, interruptWith } from "./playback.ts";
+import { APPLE_MUSIC } from "./macaudio.ts";
 import { watch } from "./watch.ts";
 import { FADE_DEFAULTS, MAX_FADE_SECONDS, fade, type FadeOptions } from "./fade.ts";
 import { isRecord } from "./validation.ts";
@@ -428,9 +429,9 @@ const commands: Command<Context>[] = [
   },
   {
     names: ["fade"],
-    options: { out: { type: "string" }, in: { type: "string" }, volume: { type: "string" } },
-    usage: "fade [next|prev|fav <name>|uri <uri>|file <path>]",
-    help: "Fade out, switch the song, fade back in. 'file' serves the file until it ends (like play-file)",
+    options: { out: { type: "string" }, in: { type: "string" }, volume: { type: "string" }, app: { type: "string" }, all: { type: "boolean" } },
+    usage: "fade [next|prev|fav <name>|uri <uri>|file <path>|mac-audio]",
+    help: "Fade out, switch the song, fade back in. 'file' and 'mac-audio' keep running like play-file and mac-audio",
     subcommands: {
       next: { run: async (ctx) => fadeTo(ctx, async (s) => { await s.next(); await s.play(); }) },
       prev: { run: async (ctx) => fadeTo(ctx, async (s) => { await s.previous(); await s.play(); }) },
@@ -454,6 +455,13 @@ const commands: Command<Context>[] = [
           await playFile(s, args.join(" "), (play) => fade(s, play, options));
         },
       },
+      "mac-audio": {
+        run: async (ctx) => {
+          const s = ctx.speaker();
+          const options = fadeOptions(ctx);
+          await playMacAudio(s, macAudioApp(ctx), (play) => fade(s, play, options));
+        },
+      },
     },
   },
   {
@@ -465,6 +473,13 @@ const commands: Command<Context>[] = [
       const path = args.join(" ");
       await playFile(ctx.speaker(), path);
     },
+  },
+  {
+    names: ["mac-audio", "mac"],
+    options: { app: { type: "string" }, all: { type: "boolean" } },
+    usage: "mac-audio [--app <bundle-id>|--all]",
+    help: "Stream Apple Music from this Mac (the Mac stays silent for it). Keeps running until Ctrl-C",
+    run: async (ctx) => playMacAudio(ctx.speaker(), macAudioApp(ctx)),
   },
   {
     names: ["interrupt", "insert"],
@@ -725,6 +740,11 @@ async function fadeTo(ctx: Context, change: (s: Speaker) => Promise<unknown>) {
   out(ctx, { ...options, track }, () => `${describeTrack(track)}  (faded out ${options.out}s, in ${options.in}s)`);
 }
 
+function macAudioApp(ctx: Context): string | undefined {
+  if (ctx.flags.has("all") && ctx.options.has("app")) throw new UsageError("--app and --all cannot be combined");
+  return ctx.flags.has("all") ? undefined : ctx.options.get("app") ?? APPLE_MUSIC;
+}
+
 function volumeOption(ctx: Context): number | undefined {
   return ctx.options.has("volume") ? int(ctx.options.get("volume"), "--volume") : undefined;
 }
@@ -789,6 +809,8 @@ Options:
   --voice <name>         say: macOS voice (list: say -v '?'), for example Anna
   --player, --household  ws: target the player or the household (default: group)
   --out <s>, --in <s>    fade: fade-out and fade-in time in seconds (default ${FADE_DEFAULTS.out} and ${FADE_DEFAULTS.in}, max ${MAX_FADE_SECONDS})
+  --app <bundle-id>      mac-audio: stream this app instead of Apple Music, for example com.spotify.client
+  --all                  mac-audio: stream all sound of the Mac
   -h, --help             Show this help
 
 Environment:
