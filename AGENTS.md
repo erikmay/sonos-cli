@@ -29,6 +29,7 @@ WebSocket command.
 
 ## Code
 
+- Work and commit in the checkout the harness gives you (T3 worktree or Amp orb); do not create worktrees yourself. Land work trunk-based: rebase onto the default branch, run the checks, push straight to it (no pull requests).
 - Parse all XML through `parseXml` in `src/xml.ts`.
 - Comments are one line and state the reason. The code carries the rest.
 - A comment-only change must leave the bundle unchanged. Compare
